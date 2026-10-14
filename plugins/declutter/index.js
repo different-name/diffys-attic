@@ -3,6 +3,7 @@
     const runtime = metro.findByProps("jsx", "jsxs", "Fragment");
     const UserStore = metro.findByStoreName("UserStore");
     const UserProfileStore = metro.findByStoreName("UserProfileStore");
+    const ApexExperimentStore = metro.findByStoreName("ApexExperimentStore");
     const { View } = metro.common.ReactNative;
 
     const navButtons = new Set(["Quests", "Shop", "Nitro", "Send a gift"]);
@@ -126,8 +127,38 @@
         return cleaned;
     }
 
-    // the experiment's swipe-to-expand server list, forced back to the unenrolled defaults
-    const withoutHomeDrawer = (_args, config) => ({ ...config, enableHome: false, landOnHome: false, enablePeekHint: false });
+    const disabledExperiments = new Set([
+        "2025-10-mobile-home-drawer",
+        "2025-12-nitro-s-rewards",
+        "2026-01-mobile-go-live-entrypoint",
+        "2026-03-mobile-quest-home-red-dot-notification",
+        "2026-04-gifting-badge",
+        "2026-04-http-request-sample",
+        "2026-04-mobile-boost-progress-bar",
+        "2026-04-mobile-go-live-upsell",
+        "2026-05-bounty-stale-refresh-quest-home",
+        "2026-05-server-theme-user",
+        "2026-06-android-two-week-trials",
+        "2026-06-gummy-bears",
+        "2026-06-gummy-viewers",
+        "2026-06-mobile-friendship-anniversary",
+        "2026-06-mobile-server-tag",
+        "2026-07-ad-recheck-interval-experiment",
+        "2026-07-custom-typing-indicator",
+        "2026-07-mobile-boosting-optimizations",
+        "2026-07-nitro-floating-subscribe",
+        "2026-07-shop-this-look-mobile",
+        "2026-08-bounties-mobile-quest-bar",
+        "2026-08-nitro-tenure-badge-withheld-state",
+        "2026-09-bounties-android-quest-bar-smoke-animation",
+        "2026-09-gifting-badge-coachmark-audience",
+        "2026-09-mobile-nitro-upsell-in-shop-feed",
+    ]);
+
+    // no assignment means getConfig and useConfig fall back to the default config and skip exposure tracking
+    function unassignExperiments(args, result) {
+        return disabledExperiments.has(args[2]) ? [result?.[0] ?? null, null] : result;
+    }
 
     let unpatches = [];
 
@@ -141,11 +172,8 @@
             unpatches.push(patcher.after("getUserProfile", UserProfileStore, cleanProfile));
             unpatches.push(patcher.after("getGuildMemberProfile", UserProfileStore, cleanProfile));
             unpatches.push(stripUserFields());
-            const homeDrawer = metro.findByProps("MobileHomeDrawerExperiment")?.MobileHomeDrawerExperiment;
-            if (homeDrawer) {
-                unpatches.push(patcher.after("getConfig", homeDrawer, withoutHomeDrawer));
-                unpatches.push(patcher.after("useConfig", homeDrawer, withoutHomeDrawer));
-            }
+            unpatches.push(patcher.after("getEvaluationAndAssignmentInner", ApexExperimentStore, unassignExperiments));
+            ApexExperimentStore.emitChange();
             UserProfileStore.emitChange();
         },
         onUnload() {

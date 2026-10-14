@@ -1,13 +1,13 @@
 {
   "name": "Declutter",
-  "description": "Hides Nitro, Shop, Quests, Orbs, gifting, billing and boost entries, the Apps tab, the wishlist, the expanded server list, server banners, clan tags, name styles, avatar decorations, nameplates, profile effects, profile themes and Nitro, booster and quest badges",
+  "description": "Hides Nitro, Shop, Quests, Orbs, gifting, billing and boost entries, the Apps tab, the wishlist, server banners, clan tags, name styles, avatar decorations, nameplates, profile effects, profile themes and Nitro, booster and quest badges, and opts out of upsell, quest and cosmetic experiments",
   "authors": [
     {
       "name": "diffy"
     }
   ],
   "main": "index.js",
-  "hash": "623bc1568663f9f6",
+  "hash": "df405a7b7252c6c9",
   "vendetta": {
     "icon": "ic_block"
   }
