@@ -1,0 +1,14 @@
+{
+  "name": "Fit Video",
+  "description": "Compresses videos over your upload limit to fit and uploads smaller H.264 and HEVC videos without re-encoding",
+  "authors": [
+    {
+      "name": "diffy"
+    }
+  ],
+  "main": "index.js",
+  "hash": "2b6af0926d950823",
+  "vendetta": {
+    "icon": "ic_video"
+  }
+}
