@@ -1,0 +1,14 @@
+{
+  "name": "Theme Fixes",
+  "description": "Tints status dots with the active theme, matches status bar icons to custom themes and keeps Join Voice readable",
+  "authors": [
+    {
+      "name": "diffy"
+    }
+  ],
+  "main": "index.js",
+  "hash": "53786d8c8e9953b7",
+  "vendetta": {
+    "icon": "ic_paint_brush"
+  }
+}

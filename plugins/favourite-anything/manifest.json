@@ -1,0 +1,18 @@
+{
+  "name": "FavouriteAnything",
+  "description": "Adds the favourite button to images and videos",
+  "authors": [
+    {
+      "name": "TheUnrealZaka",
+      "id": "299007476055269376"
+    },
+    {
+      "name": "diffy"
+    }
+  ],
+  "main": "index.js",
+  "hash": "2e3e5f353555e9e4",
+  "vendetta": {
+    "icon": "ic_star_filled"
+  }
+}

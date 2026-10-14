@@ -1,0 +1,14 @@
+{
+  "name": "No Track",
+  "description": "Blocks Discord analytics and metrics, Sentry crash reports and third-party trackers",
+  "authors": [
+    {
+      "name": "diffy"
+    }
+  ],
+  "main": "index.js",
+  "hash": "3019f2694e996d95",
+  "vendetta": {
+    "icon": "ic_shield_24px"
+  }
+}
