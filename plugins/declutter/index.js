@@ -126,6 +126,9 @@
         return cleaned;
     }
 
+    // the experiment's swipe-to-expand server list, forced back to the unenrolled defaults
+    const withoutHomeDrawer = (_args, config) => ({ ...config, enableHome: false, landOnHome: false, enablePeekHint: false });
+
     let unpatches = [];
 
     return {
@@ -138,6 +141,11 @@
             unpatches.push(patcher.after("getUserProfile", UserProfileStore, cleanProfile));
             unpatches.push(patcher.after("getGuildMemberProfile", UserProfileStore, cleanProfile));
             unpatches.push(stripUserFields());
+            const homeDrawer = metro.findByProps("MobileHomeDrawerExperiment")?.MobileHomeDrawerExperiment;
+            if (homeDrawer) {
+                unpatches.push(patcher.after("getConfig", homeDrawer, withoutHomeDrawer));
+                unpatches.push(patcher.after("useConfig", homeDrawer, withoutHomeDrawer));
+            }
             UserProfileStore.emitChange();
         },
         onUnload() {
