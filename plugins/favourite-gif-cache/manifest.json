@@ -1,0 +1,14 @@
+{
+  "name": "Favourite GIF Cache",
+  "description": "Keeps your favourite GIFs on the phone so the picker loads them without the network",
+  "authors": [
+    {
+      "name": "diffy"
+    }
+  ],
+  "main": "index.js",
+  "hash": "ec721086fbc04a09",
+  "vendetta": {
+    "icon": "GifIcon"
+  }
+}
