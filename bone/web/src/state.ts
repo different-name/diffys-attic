@@ -13,6 +13,7 @@ export const [selected, setSelected] = createSignal<number | null>(null);
 export const [pane, setPane] = createSignal<Pane>("list");
 export const [compose, setCompose] = createSignal<ComposeState | null>(null);
 export const [notice, setNotice] = createSignal<string | null>(null);
+export const [checked, setChecked] = createSignal<ReadonlySet<number>>(new Set());
 
 export const [list, setList] = createStore({
   items: [] as Conversation[],
@@ -75,7 +76,35 @@ export async function loadMore() {
   }
 }
 
+let anchor: number | null = null;
+
+export function clearChecked() {
+  anchor = null;
+  setChecked(new Set<number>());
+}
+
+export function toggleChecked(thread: number, range = false) {
+  const next = new Set(checked());
+  const ids = list.items.map((c) => c.thread);
+  const from = anchor === null ? -1 : ids.indexOf(anchor);
+  const to = ids.indexOf(thread);
+  if (range && from >= 0 && to >= 0) {
+    for (const t of ids.slice(Math.min(from, to), Math.max(from, to) + 1)) next.add(t);
+  } else if (next.has(thread)) {
+    next.delete(thread);
+  } else {
+    next.add(thread);
+  }
+  anchor = thread;
+  setChecked(next);
+}
+
+export function checkAll() {
+  setChecked(new Set(list.items.map((c) => c.thread)));
+}
+
 export function openFolder(key: string) {
+  clearChecked();
   setQuery("");
   setFolder(key);
   setSelected(null);
@@ -85,6 +114,7 @@ export function openFolder(key: string) {
 }
 
 export function search(q: string) {
+  clearChecked();
   setQuery(q);
   setSelected(null);
   setPane("list");
@@ -108,10 +138,13 @@ export function closeCompose() {
   setPane(was?.kind === "reply" && selected() !== null ? "thread" : "list");
 }
 
-function neighbour(thread: number): number | null {
-  const i = list.items.findIndex((c) => c.thread === thread);
+function neighbour(thread: number, gone: ReadonlySet<number>): number | null {
+  const items = list.items;
+  const i = items.findIndex((c) => c.thread === thread);
   if (i < 0) return null;
-  return (list.items[i + 1] ?? list.items[i - 1])?.thread ?? null;
+  const after = items.slice(i + 1).find((c) => !gone.has(c.thread));
+  const before = items.slice(0, i).reverse().find((c) => !gone.has(c.thread));
+  return (after ?? before)?.thread ?? null;
 }
 
 export function move(step: 1 | -1) {
@@ -130,26 +163,32 @@ export async function threadIds(thread: number, op: Op): Promise<number[]> {
   return inScope.map((r) => r.id);
 }
 
-export async function act(thread: number, op: Op, target?: string) {
-  const ids = await threadIds(thread, op);
+export function act(thread: number, op: Op, target?: string) {
+  return actOn([thread], op, target);
+}
+
+export async function actOn(threads: number[], op: Op, target?: string) {
+  const ids = (await Promise.all(threads.map((t) => threadIds(t, op)))).flat();
   if (!ids.length) return;
+  const gone = new Set(threads);
   const leaves = op === "archive" || op === "delete" || op === "junk" || op === "move" || op === "inbox";
-  const after = leaves ? neighbour(thread) : thread;
   if (leaves) {
-    leaving.set(thread, { from: listFolder(), until: Date.now() + 60_000 });
-    setList("items", (items) => items.filter((c) => c.thread !== thread));
-    if (selected() === thread) {
+    const open = selected();
+    const after = open !== null && gone.has(open) ? neighbour(open, gone) : open;
+    for (const t of threads) leaving.set(t, { from: listFolder(), until: Date.now() + 60_000 });
+    setList("items", (items) => items.filter((c) => !gone.has(c.thread)));
+    setChecked((c) => new Set([...c].filter((t) => !gone.has(t))));
+    if (after !== open) {
       setSelected(after);
       if (after === null) setPane("list");
     }
-  } else {
-    const unread = op === "unread";
-    if (op === "read" || op === "unread") setList("items", (c) => c.thread === thread, "unread", unread);
+  } else if (op === "read" || op === "unread") {
+    setList("items", (c) => gone.has(c.thread), "unread", op === "unread");
   }
   try {
     await api.act(ids, op, target);
   } catch (e) {
-    leaving.delete(thread);
+    for (const t of threads) leaving.delete(t);
     setNotice(e instanceof Error ? e.message : "That didn't work");
     void loadList();
   }

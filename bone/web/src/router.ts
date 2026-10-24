@@ -1,5 +1,18 @@
 import { batch, createEffect, onCleanup } from "solid-js";
-import { compose, folder, loadList, pane, query, selected, setCompose, setFolder, setPane, setQuery, setSelected } from "./state";
+import {
+  clearChecked,
+  compose,
+  folder,
+  loadList,
+  pane,
+  query,
+  selected,
+  setCompose,
+  setFolder,
+  setPane,
+  setQuery,
+  setSelected,
+} from "./state";
 
 export type Route = { folder: string; query: string; thread: number | null; compose: boolean };
 
@@ -35,6 +48,7 @@ function current(): Route {
 function apply(r: Route): boolean {
   const reload = r.folder !== folder() || r.query !== query();
   batch(() => {
+    if (reload) clearChecked();
     setFolder(r.folder);
     setQuery(r.query);
     setSelected(r.thread);

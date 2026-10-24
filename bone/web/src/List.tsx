@@ -2,18 +2,41 @@ import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { local, splitQuery, when } from "./format";
 import { Icon } from "./icons";
 import { threadHref } from "./router";
-import { FolderMenu } from "./Sidebar";
-import { act, folder, folders, list, loadMore, open, query, search, searching, selected } from "./state";
+import { drawerSwipe, openDrawer } from "./Drawer";
+import {
+  act,
+  actOn,
+  checkAll,
+  checked,
+  clearChecked,
+  folder,
+  folders,
+  list,
+  loadMore,
+  open,
+  query,
+  search,
+  searching,
+  selected,
+  toggleChecked,
+} from "./state";
+import { MoveMenu } from "./Thread";
 import type { Conversation } from "./types";
 
 const SWIPE_ARCHIVE = 110;
+const LONG_PRESS = 450;
+
+const selecting = () => checked().size > 0;
 
 function Row(props: { c: Conversation }) {
   const [dx, setDx] = createSignal(0);
+  const isChecked = () => checked().has(props.c.thread);
   let startX = 0;
   let startY = 0;
   let tracking = false;
   let horizontal = false;
+  let pressed = false;
+  let press: number | undefined;
 
   const down = (e: PointerEvent) => {
     if (e.pointerType === "mouse") return;
@@ -21,18 +44,32 @@ function Row(props: { c: Conversation }) {
     startY = e.clientY;
     tracking = true;
     horizontal = false;
+    pressed = false;
+    press = window.setTimeout(() => {
+      pressed = true;
+      tracking = false;
+      navigator.vibrate?.(10);
+      toggleChecked(props.c.thread);
+    }, LONG_PRESS);
   };
   const moveTo = (e: PointerEvent) => {
     if (!tracking) return;
     const x = e.clientX - startX;
     const y = e.clientY - startY;
+    if (Math.abs(x) > 10 || Math.abs(y) > 10) window.clearTimeout(press);
+    if (selecting()) return;
     if (!horizontal && Math.abs(x) > 10 && Math.abs(x) > Math.abs(y)) {
+      if (x > 0) {
+        tracking = false;
+        return;
+      }
       horizontal = true;
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     }
     if (horizontal) setDx(Math.min(0, x));
   };
   const up = () => {
+    window.clearTimeout(press);
     if (!tracking) return;
     tracking = false;
     if (dx() < -SWIPE_ARCHIVE) void act(props.c.thread, "archive");
@@ -48,20 +85,38 @@ function Row(props: { c: Conversation }) {
         </div>
       </Show>
       <a
-        class={`row${props.c.unread ? " unread" : ""}${selected() === props.c.thread ? " selected" : ""}`}
+        class={`row${props.c.unread ? " unread" : ""}${selected() === props.c.thread ? " selected" : ""}${isChecked() ? " checked" : ""}`}
         href={threadHref(props.c.thread)}
         style={{ transform: dx() ? `translateX(${dx()}px)` : undefined }}
         onClick={(e) => {
           e.preventDefault();
-          if (!horizontal) open(props.c.thread);
+          if (pressed || horizontal) return;
+          if (selecting() || e.shiftKey || e.ctrlKey || e.metaKey) toggleChecked(props.c.thread, e.shiftKey);
+          else open(props.c.thread);
         }}
+        onContextMenu={(e) => pressed && e.preventDefault()}
         onPointerDown={down}
         onPointerMove={moveTo}
         onPointerUp={up}
         onPointerCancel={up}
       >
         <div class="line">
-          <span class={`dot${props.c.unread ? " on" : ""}`} aria-label={props.c.unread ? "Unread" : undefined} />
+          <span class="mark">
+            <span class={`dot${props.c.unread ? " on" : ""}`} aria-label={props.c.unread ? "Unread" : undefined} />
+            <span
+              class="check"
+              role="checkbox"
+              aria-checked={isChecked()}
+              aria-label="Select"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                toggleChecked(props.c.thread, e.shiftKey);
+              }}
+            >
+              <Icon name="check" size={12} />
+            </span>
+          </span>
           <span class="from">{props.c.from?.name || props.c.from?.addr || "Unknown sender"}</span>
           <Show when={props.c.messages > 1}>
             <span class="mono meta" style={{ "font-size": "11px" }}>
@@ -136,20 +191,63 @@ export function SearchField(props: { autofocus?: boolean; ref?: (el: HTMLInputEl
   );
 }
 
+function SelectionBar() {
+  const [moving, setMoving] = createSignal(false);
+  const threads = () => [...checked()];
+  const anyUnread = () => list.items.some((c) => c.unread && checked().has(c.thread));
+  const all = () => list.items.length > 0 && list.items.every((c) => checked().has(c.thread));
+
+  return (
+    <div class="pane-head selection">
+      <button class="btn ghost icon-btn" aria-label="Clear selection" onClick={clearChecked}>
+        <Icon name="close" size={16} />
+      </button>
+      <span class="count">{checked().size} selected</span>
+      <button class="btn ghost" onClick={() => (all() ? clearChecked() : checkAll())}>
+        {all() ? "None" : "All"}
+      </button>
+      <div class="end">
+        <Show when={searching() || folder() !== "archive"}>
+          <button class="btn done" aria-label="Archive" onClick={() => void actOn(threads(), "archive")}>
+            <span class="phone-only">
+              <Icon name="archive" size={16} />
+            </span>
+            <span class="desktop-only">Archive</span>
+            <span class="kbd desktop-only">e</span>
+          </button>
+        </Show>
+        <button class="btn ghost icon-btn" aria-label={anyUnread() ? "Mark read" : "Mark unread"} title={anyUnread() ? "Mark read (u)" : "Mark unread (u)"} onClick={() => void actOn(threads(), anyUnread() ? "read" : "unread")}>
+          <Icon name="mail" size={16} />
+        </button>
+        <button class="btn ghost icon-btn" aria-label="Move" title="Move" onClick={() => setMoving(true)}>
+          <Icon name="folder" size={16} />
+        </button>
+        <button class="btn danger icon-btn" aria-label="Delete" title="Delete (#)" onClick={() => void actOn(threads(), "delete")}>
+          <Icon name="trash" size={16} />
+        </button>
+      </div>
+      <Show when={moving()}>
+        <MoveMenu threads={threads()} onClose={() => setMoving(false)} />
+      </Show>
+    </div>
+  );
+}
+
 export function List(props: { searchRef?: (el: HTMLInputElement) => void }) {
-  const [menu, setMenu] = createSignal(false);
   const [phoneSearch, setPhoneSearch] = createSignal(false);
   const current = () => folders().find((f) => f.key === folder());
   const title = () => (searching() ? "Search" : (current()?.name ?? "Inbox"));
 
   return (
-    <section class="list" aria-label={title()}>
-      <div class="pane-head">
-        <h1 class="desktop-only">{title()}</h1>
-        <button class="btn ghost phone-only" style={{ padding: "0 6px 0 0", color: "var(--text)" }} onClick={() => setMenu(true)}>
-          <h1>{title()}</h1>
-          <Icon name="down" size={16} style={{ color: "var(--meta)" }} />
+    <section class={`list${selecting() ? " selecting" : ""}`} aria-label={title()} {...drawerSwipe(1, () => !selecting())}>
+      <Show when={selecting()}>
+        <SelectionBar />
+      </Show>
+      <div class="pane-head" hidden={selecting()}>
+        <button class="btn ghost icon-btn phone-only" aria-label="Folders" onClick={openDrawer}>
+          <Icon name="menu" size={20} />
         </button>
+        <h1>{title()}</h1>
         <Show when={!searching() && current()}>
           <span class="mono meta" style={{ "font-size": "11px" }}>
             {current()!.unread ? `${current()!.unread} unread` : ""}
@@ -186,9 +284,6 @@ export function List(props: { searchRef?: (el: HTMLInputElement) => void }) {
           </div>
         </Show>
       </div>
-      <Show when={menu()}>
-        <FolderMenu onClose={() => setMenu(false)} />
-      </Show>
     </section>
   );
 }

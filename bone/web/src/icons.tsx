@@ -2,6 +2,7 @@ import type { JSX } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import {
   Archive,
+  Check,
   ChevronDown,
   ChevronLeft,
   ChevronUp,
@@ -10,6 +11,7 @@ import {
   Inbox,
   Lock,
   Mail,
+  Menu,
   Pencil,
   Plus,
   Search,
@@ -28,6 +30,8 @@ const icons = {
   lock: Lock,
   back: ChevronLeft,
   close: X,
+  check: Check,
+  menu: Menu,
   down: ChevronDown,
   up: ChevronUp,
   file: File,

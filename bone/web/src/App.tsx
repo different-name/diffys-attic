@@ -1,12 +1,16 @@
 import { createEffect, onCleanup, onMount, Show } from "solid-js";
 import { listen, online, token } from "./api";
 import { Composer } from "./Composer";
+import { Drawer } from "./Drawer";
 import { Icon } from "./icons";
 import { List } from "./List";
 import { Sidebar } from "./Sidebar";
 import { SignIn } from "./SignIn";
 import {
   act,
+  actOn,
+  checked,
+  clearChecked,
   compose,
   folder,
   loadFolders,
@@ -21,6 +25,7 @@ import {
   setPane,
   startCompose,
   list,
+  toggleChecked,
 } from "./state";
 import { useRouter } from "./router";
 import { bumpThread, Thread } from "./Thread";
@@ -74,9 +79,23 @@ function Mail() {
         startCompose({ kind: "new" });
         break;
       case "Escape":
-        if (pane() !== "list") setPane("list");
+        if (checked().size) clearChecked();
+        else if (pane() !== "list") setPane("list");
         return;
+      case "x":
+        if (thread === null) return;
+        toggleChecked(thread);
+        break;
       default:
+        if (checked().size) {
+          const threads = [...checked()];
+          const unread = list.items.some((c) => c.unread && checked().has(c.thread));
+          if (e.key === "e") void actOn(threads, "archive");
+          else if (e.key === "u") void actOn(threads, unread ? "read" : "unread");
+          else if (e.key === "#") void actOn(threads, "delete");
+          else return;
+          break;
+        }
         if (thread === null) return;
         if (e.key === "e") void act(thread, "archive");
         else if (e.key === "u") void act(thread, latest?.unread ? "read" : "unread");
@@ -119,6 +138,7 @@ function Mail() {
             <Composer pane />
           </section>
         </Show>
+        <Drawer />
         <button class="fab" onClick={() => startCompose({ kind: "new" })}>
           <Icon name="pencil" size={18} />
           Compose

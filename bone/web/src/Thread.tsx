@@ -4,24 +4,25 @@ import { Composer } from "./Composer";
 import { local, when, who } from "./format";
 import { Icon } from "./icons";
 import { MessageView } from "./Message";
-import { act, compose, folder, folders, list, searching, setList, setPane, startCompose } from "./state";
+import { act, actOn, compose, folder, folders, list, searching, setList, setPane, startCompose } from "./state";
 import type { Row } from "./types";
 
 export const [threadVersion, bumpThread] = createSignal(0);
 
-function MoveMenu(props: { thread: number; onClose: () => void }) {
+export function MoveMenu(props: { threads: number[]; onClose: () => void }) {
   const targets = () => folders().filter((f) => f.key !== folder() && f.key !== "sent" && f.key !== "drafts");
   return (
     <>
       <div class="scrim" onClick={props.onClose} />
-      <div class="menu" role="menu" style={{ top: "44px", right: "16px" }}>
+      <div class="menu anchored" role="menu" aria-label="Move to">
+        <div class="grip phone-only" aria-hidden="true" />
         <For each={targets()}>
           {(f) => (
             <button
               role="menuitem"
               onClick={() => {
                 props.onClose();
-                void act(props.thread, "move", f.key);
+                void actOn(props.threads, "move", f.key);
               }}
             >
               {f.name}
@@ -108,7 +109,7 @@ export function Thread(props: { thread: number }) {
           </button>
         </div>
         <Show when={moving()}>
-          <MoveMenu thread={props.thread} onClose={() => setMoving(false)} />
+          <MoveMenu threads={[props.thread]} onClose={() => setMoving(false)} />
         </Show>
       </div>
 

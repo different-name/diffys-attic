@@ -2,9 +2,11 @@ import { For } from "solid-js";
 import { Icon } from "./icons";
 import { folder, folders, openFolder, searching, startCompose } from "./state";
 
-export function Sidebar() {
+const SPECIAL = new Set(["inbox", "archive", "sent", "drafts", "junk", "trash"]);
+
+export function Sidebar(props: { drawer?: boolean; onPick?: () => void }) {
   return (
-    <nav class="sidebar" aria-label="Folders">
+    <nav class={`sidebar${props.drawer ? " in-drawer" : ""}`} aria-label="Folders">
       <div class="brand">
         <span>bone</span>
         <button class="btn primary icon-btn" aria-label="New message" title="New message (c)" onClick={() => startCompose({ kind: "new" })}>
@@ -12,37 +14,23 @@ export function Sidebar() {
         </button>
       </div>
       <For each={folders()}>
-        {(f) => (
-          <button class={`folder${!searching() && folder() === f.key ? " active" : ""}`} onClick={() => openFolder(f.key)}>
+        {(f, i) => (
+          <button
+            class="folder"
+            classList={{
+              active: !searching() && folder() === f.key,
+              split: !SPECIAL.has(f.key) && i() > 0 && SPECIAL.has(folders()[i() - 1].key),
+            }}
+            onClick={() => {
+              openFolder(f.key);
+              props.onPick?.();
+            }}
+          >
             <span>{f.name}</span>
             <span class="count">{f.unread || ""}</span>
           </button>
         )}
       </For>
     </nav>
-  );
-}
-
-export function FolderMenu(props: { onClose: () => void }) {
-  return (
-    <>
-      <div class="scrim" onClick={props.onClose} />
-      <div class="menu" role="menu" style={{ top: "56px", left: "12px" }}>
-        <For each={folders()}>
-          {(f) => (
-            <button
-              role="menuitem"
-              onClick={() => {
-                openFolder(f.key);
-                props.onClose();
-              }}
-            >
-              {f.name}
-              {f.unread ? <span class="mono meta"> {f.unread}</span> : null}
-            </button>
-          )}
-        </For>
-      </div>
-    </>
   );
 }
