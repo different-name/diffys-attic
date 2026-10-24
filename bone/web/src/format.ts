@@ -5,11 +5,12 @@ const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
 const pad = (n: number) => String(n).padStart(2, "0");
+const clock = (d: Date) => `${d.getHours() % 12 || 12}:${pad(d.getMinutes())} ${d.getHours() < 12 ? "am" : "pm"}`;
 
 export function when(seconds: number, now = new Date()): string {
   const d = new Date(seconds * 1000);
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  if (d.getTime() >= startOfToday) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (d.getTime() >= startOfToday) return clock(d);
   if (d.getTime() >= startOfToday - DAY) return "yesterday";
   if (d.getTime() >= startOfToday - 6 * DAY) return WEEKDAYS[d.getDay()];
   if (d.getFullYear() === now.getFullYear()) return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
@@ -18,7 +19,7 @@ export function when(seconds: number, now = new Date()): string {
 
 export function fullWhen(seconds: number): string {
   const d = new Date(seconds * 1000);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(d)}`;
 }
 
 export const local = (address: string | null) => (address ? `${address.split("@")[0]}@` : "");
