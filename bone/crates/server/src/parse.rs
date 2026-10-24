@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use mail_parser::{Address, HeaderValue, Message, MessageParser, MimeHeaders};
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: i64 = 1;
+pub const VERSION: i64 = 2;
 
 const BODY_LIMIT: usize = 64 * 1024;
 const SNIPPET_LIMIT: usize = 200;
@@ -32,6 +32,8 @@ pub struct Parsed {
     pub cc: Vec<Mailbox>,
     pub date: Option<i64>,
     pub recipient: Option<String>,
+    pub recipient_hosted: bool,
+    pub reply_to: Vec<Mailbox>,
     pub attachments: Vec<Attachment>,
     pub snippet: String,
     pub body: String,
@@ -52,6 +54,10 @@ pub fn parse(raw: &[u8], blob: &str, own_domains: &HashSet<String>) -> Parsed {
     };
     let to = mailboxes(msg.to());
     let cc = mailboxes(msg.cc());
+    let (recipient, recipient_hosted) = match recipient(&msg, &to, &cc, own_domains) {
+        Some((addr, hosted)) => (Some(addr), hosted),
+        None => (None, false),
+    };
     let body = msg
         .body_text(0)
         .map(|t| truncate(&t, BODY_LIMIT).to_string())
@@ -70,7 +76,9 @@ pub fn parse(raw: &[u8], blob: &str, own_domains: &HashSet<String>) -> Parsed {
         parents,
         subject: msg.subject().unwrap_or_default().trim().to_string(),
         from: mailboxes(msg.from()).into_iter().next(),
-        recipient: recipient(&msg, &to, &cc, own_domains),
+        recipient,
+        recipient_hosted,
+        reply_to: mailboxes(msg.reply_to()),
         to,
         cc,
         date: msg.date().map(|d| d.to_timestamp()),
@@ -100,14 +108,15 @@ fn recipient(
     to: &[Mailbox],
     cc: &[Mailbox],
     own_domains: &HashSet<String>,
-) -> Option<String> {
+) -> Option<(String, bool)> {
     for header in ENVELOPE_HEADERS {
         if let Some(addr) = msg
             .header_values(*header)
             .filter_map(HeaderValue::as_text)
             .find_map(first_address)
         {
-            return Some(addr);
+            // only migadu itself sets X-Envelope-To, so it can also send from that address
+            return Some((addr, *header == "X-Envelope-To"));
         }
     }
     to.iter()
@@ -117,7 +126,7 @@ fn recipient(
             a.rsplit_once('@')
                 .is_some_and(|(_, d)| own_domains.contains(d))
         })
-        .cloned()
+        .map(|a| (a.clone(), false))
 }
 
 fn first_address(value: &str) -> Option<String> {
@@ -206,6 +215,7 @@ mod tests {
             "Delivered-To: catch@example.com\nX-Envelope-To: shop.fox@example.com\nFrom: Shop <news@shop.example.net>\nTo: shop.fox@example.com\nSubject: Sale\nMessage-ID: <1@shop>\n\nhello",
         );
         assert_eq!(p.recipient.as_deref(), Some("shop.fox@example.com"));
+        assert!(p.recipient_hosted);
         assert_eq!(
             p.from,
             Some(Mailbox {
@@ -222,6 +232,7 @@ mod tests {
             "Delivered-To: old@mail.example.org\nX-Original-To: old@mail.example.org\nFrom: a@example.net\nTo: old@mail.example.org\nSubject: x\n\nbody",
         );
         assert_eq!(p.recipient.as_deref(), Some("old@mail.example.org"));
+        assert!(!p.recipient_hosted);
     }
 
     #[test]
@@ -232,6 +243,14 @@ mod tests {
         assert_eq!(p.recipient.as_deref(), Some("alias@example.com"));
         let p = parse_str("From: a@example.net\nTo: b@example.net\nSubject: x\n\nbody");
         assert_eq!(p.recipient, None);
+    }
+
+    #[test]
+    fn keeps_reply_to() {
+        let p = parse_str(
+            "From: List <list@example.net>\nReply-To: Thread <thread-1@example.net>\nTo: me@example.com\nSubject: x\n\nbody",
+        );
+        assert_eq!(p.reply_to[0].addr, "thread-1@example.net");
     }
 
     #[test]

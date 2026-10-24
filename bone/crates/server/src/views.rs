@@ -50,9 +50,16 @@ pub struct MessageMeta {
     pub message_id: String,
     pub to: Vec<Mailbox>,
     pub cc: Vec<Mailbox>,
+    pub reply_to: Vec<Mailbox>,
     pub attachment_list: Vec<Attachment>,
     #[serde(skip)]
     pub blob: String,
+    #[serde(skip)]
+    pub account: String,
+    #[serde(skip)]
+    pub parents: Vec<String>,
+    #[serde(skip)]
+    pub recipient_hosted: bool,
 }
 
 pub struct Cursor {
@@ -232,7 +239,7 @@ impl Db {
 
     pub async fn message(&self, id: i64) -> Result<Option<MessageMeta>> {
         let r = sqlx::query(with_row!(
-            ", p.message_id, p.to_json, p.cc_json, p.blob",
+            ", p.message_id, p.to_json, p.cc_json, p.blob, f.account, p.reply_to_json, p.parents_json, p.recipient_hosted",
             "WHERE m.id = ?"
         ))
         .bind(id)
@@ -246,9 +253,60 @@ impl Db {
             message_id: r.get("message_id"),
             to: serde_json::from_str(r.get("to_json"))?,
             cc: serde_json::from_str(r.get("cc_json"))?,
+            reply_to: serde_json::from_str(r.get("reply_to_json"))?,
             attachment_list: serde_json::from_str(r.get("attachments_json"))?,
             blob: r.get("blob"),
+            account: r.get("account"),
+            parents: serde_json::from_str(r.get("parents_json"))?,
+            recipient_hosted: r.get("recipient_hosted"),
         }))
+    }
+
+    pub async fn own(&self, logins: &[String]) -> Result<crate::compose::Own> {
+        let mut own = crate::compose::Own::default();
+        for login in logins {
+            own.addresses.insert(login.to_ascii_lowercase());
+            if let Some(d) = crate::compose::domain(login) {
+                own.domains.insert(d.to_ascii_lowercase());
+            }
+        }
+        let rows = sqlx::query(
+            "SELECT DISTINCT recipient, recipient_hosted FROM parsed WHERE recipient IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for r in &rows {
+            let addr: String = r.get("recipient");
+            if r.get::<bool, _>("recipient_hosted")
+                && let Some(d) = crate::compose::domain(&addr)
+            {
+                own.domains.insert(d.to_string());
+            }
+            own.addresses.insert(addr);
+        }
+        Ok(own)
+    }
+
+    pub async fn sender_account(&self, domain: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT f.account FROM message m JOIN folder f ON f.id = m.folder_id JOIN parsed p ON p.blob = m.blob
+             WHERE p.recipient_hosted = 1 AND substr(p.recipient, instr(p.recipient, '@') + 1) = ?
+             ORDER BY COALESCE(p.date, m.internal_date) DESC LIMIT 1",
+        )
+        .bind(domain)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn display_name(&self, addr: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT p.from_name FROM message m JOIN folder f ON f.id = m.folder_id JOIN parsed p ON p.blob = m.blob
+             WHERE f.role = 'sent' AND p.from_addr = ? AND p.from_name IS NOT NULL
+             ORDER BY COALESCE(p.date, m.internal_date) DESC LIMIT 1",
+        )
+        .bind(addr)
+        .fetch_optional(&self.pool)
+        .await?)
     }
 
     pub async fn folders_of_blobs(&self, blobs: &[String]) -> Result<HashSet<String>> {

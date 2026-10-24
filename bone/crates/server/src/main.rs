@@ -1,6 +1,7 @@
 mod actions;
 mod api;
 mod clean;
+mod compose;
 mod config;
 mod db;
 mod hub;
@@ -65,9 +66,17 @@ async fn main() -> Result<()> {
     ));
 
     let mut accounts = HashMap::new();
+    let mut outbound = HashMap::new();
     for account in &config.accounts {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         accounts.insert(account.name.clone(), tx);
+        outbound.insert(
+            account.name.clone(),
+            api::Outbound {
+                config: account.clone(),
+                login: read_secret(&account.login_file)?,
+            },
+        );
         tokio::spawn(sync::run(
             account.clone(),
             db.clone(),
@@ -96,6 +105,7 @@ async fn main() -> Result<()> {
         hub,
         tokens: Arc::new(tokens),
         accounts: Arc::new(accounts),
+        outbound: Arc::new(outbound),
     };
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await

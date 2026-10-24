@@ -18,8 +18,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
-use crate::actions::{Command, Op, SEEN};
+use crate::actions::{ANSWERED, Command, Op, SEEN};
 use crate::clean;
+use crate::compose::{self, Outgoing, Threading};
+use crate::config::AccountConfig;
 use crate::db::Db;
 use crate::hub::Hub;
 use crate::query::Query;
@@ -37,6 +39,13 @@ pub struct App {
     pub hub: Arc<Hub>,
     pub tokens: Arc<Vec<[u8; 32]>>,
     pub accounts: Arc<HashMap<String, mpsc::Sender<Command>>>,
+    pub outbound: Arc<HashMap<String, Outbound>>,
+}
+
+#[derive(Clone)]
+pub struct Outbound {
+    pub config: AccountConfig,
+    pub login: String,
 }
 
 pub fn hash_token(token: &str) -> [u8; 32] {
@@ -54,6 +63,8 @@ pub fn router(app: App) -> Router {
         .route("/api/threads/{thread}", get(thread))
         .route("/api/events", get(events))
         .route("/api/actions", post(act))
+        .route("/api/messages/{id}/reply", get(reply_draft))
+        .route("/api/send", post(send))
         .with_state(app)
 }
 
@@ -410,6 +421,151 @@ async fn act(
     Ok(Json(json!({ "done": req.ids.len() })))
 }
 
+async fn command(
+    app: &App,
+    account: &str,
+    folder_id: i64,
+    uids: Vec<u32>,
+    op: Op,
+) -> Result<(), String> {
+    let Some(tx) = app.accounts.get(account) else {
+        return Err(format!("no sync task for account {account}"));
+    };
+    let (reply, rx) = oneshot::channel();
+    tx.send(Command {
+        folder_id,
+        uids,
+        op,
+        reply,
+    })
+    .await
+    .map_err(|_| format!("sync task for {account} has stopped"))?;
+    match tokio::time::timeout(ACTION_TIMEOUT, rx).await {
+        Ok(Ok(result)) => result,
+        _ => Err("the mail server didn't answer in time".into()),
+    }
+}
+
+fn logins(app: &App) -> Vec<String> {
+    app.outbound.values().map(|o| o.login.clone()).collect()
+}
+
+async fn reply_draft(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+    Path(id): Path<i64>,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    let original = app.db.message(id).await?.ok_or_else(not_found)?;
+    let own = app.db.own(&logins(&app)).await?;
+    let fallback = app
+        .outbound
+        .get(&original.account)
+        .map(|o| o.login.clone())
+        .unwrap_or_default();
+    let all = params.get("all").is_some_and(|v| v == "1" || v == "true");
+    Ok(Json(compose::reply(&original, &own, &fallback, all)))
+}
+
+async fn send(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+    Json(out): Json<Outgoing>,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    let bad = |m: String| ApiError(StatusCode::BAD_REQUEST, m);
+    let from_addr = out.from.trim().to_ascii_lowercase();
+    let own = app.db.own(&logins(&app)).await?;
+    if !own.contains(&from_addr) {
+        return Err(bad(format!("{from_addr} isn't one of your addresses")));
+    }
+    let from_domain = compose::domain(&from_addr)
+        .ok_or_else(|| bad(format!("{from_addr} is not a valid address")))?;
+    let account = match app.db.sender_account(from_domain).await? {
+        Some(a) => a,
+        None => app
+            .outbound
+            .iter()
+            .find(|(_, o)| compose::domain(&o.login) == Some(from_domain))
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| bad(format!("none of your mailboxes can send as {from_addr}")))?,
+    };
+    let outbound = app
+        .outbound
+        .get(&account)
+        .ok_or_else(|| anyhow::anyhow!("no config for account {account}"))?;
+
+    let original = match out.reply_to {
+        Some(id) => Some(app.db.message(id).await?.ok_or_else(not_found)?),
+        None => None,
+    };
+    let threading = original.as_ref().map(|o| Threading {
+        message_id: o.message_id.clone(),
+        parents: o.parents.clone(),
+    });
+    let from = crate::parse::Mailbox {
+        name: app.db.display_name(&from_addr).await?,
+        addr: from_addr.clone(),
+    };
+    let message_id = compose::new_message_id(&from_addr);
+    let message = compose::build(&out, &from, &message_id, threading.as_ref(), false)
+        .map_err(|e| bad(format!("{e:#}")))?;
+    let copy = compose::build(&out, &from, &message_id, threading.as_ref(), true)
+        .map_err(|e| bad(format!("{e:#}")))?;
+
+    compose::submit(&outbound.config, &message)
+        .await
+        .map_err(|e| {
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                format!("Migadu didn't accept it: {e:#}"),
+            )
+        })?;
+    tracing::info!(account, "sent a message");
+
+    let sent_folder = app
+        .db
+        .folders(&account)
+        .await?
+        .into_iter()
+        .find(|f| f.role.as_deref() == Some("sent"));
+    let saved = match sent_folder {
+        Some(f) => {
+            command(
+                &app,
+                &account,
+                f.id,
+                Vec::new(),
+                Op::Append(copy.formatted()),
+            )
+            .await
+        }
+        None => Err("this mailbox has no Sent folder".into()),
+    };
+    if let Err(e) = &saved {
+        tracing::warn!(account, "sent but not saved to Sent: {e}");
+    }
+    if let Some(o) = &original
+        && let Some(l) = app.db.locate(&[o.row.id]).await?.into_iter().next()
+    {
+        let answered = Op::Flags {
+            add: vec![ANSWERED],
+            remove: vec![],
+        };
+        if let Err(e) = command(&app, &l.account, l.folder_id, vec![l.uid], answered).await {
+            tracing::warn!("couldn't mark the original as answered: {e}");
+        }
+    }
+    Ok(Json(json!({
+        "sent": true,
+        "from": from_addr,
+        "saved": saved.is_ok(),
+        "error": saved.err(),
+    })))
+}
+
 async fn events(
     State(app): State<App>,
     headers: HeaderMap,
@@ -518,6 +674,7 @@ mod tests {
             hub: Arc::new(Hub::new()),
             tokens: Arc::new(vec![hash_token(TOKEN)]),
             accounts: Arc::new(HashMap::new()),
+            outbound: Arc::new(HashMap::new()),
         };
         add(&app, "main", "INBOX", Some("inbox"), 1, "\\Seen",
             "From: Shop <news@shop.example.net>\nTo: me@example.com\nMessage-ID: <1@x>\nDate: Tue, 20 Oct 2026 10:00:00 +0000\nSubject: Your invoice\n\nThanks for the order").await;

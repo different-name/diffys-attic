@@ -1,0 +1,377 @@
+use std::collections::HashSet;
+
+use anyhow::{Context, Result, bail};
+use lettre::message::header::ContentType;
+use lettre::message::{Mailbox as LettreMailbox, Message};
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::extension::ClientId;
+use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
+use serde::{Deserialize, Serialize};
+
+use crate::config::{AccountConfig, read_secret};
+use crate::parse::Mailbox;
+use crate::views::MessageMeta;
+
+#[derive(Debug, Default)]
+pub struct Own {
+    pub addresses: HashSet<String>,
+    pub domains: HashSet<String>,
+}
+
+impl Own {
+    pub fn contains(&self, addr: &str) -> bool {
+        let addr = addr.to_ascii_lowercase();
+        self.addresses.contains(&addr) || domain(&addr).is_some_and(|d| self.domains.contains(d))
+    }
+}
+
+pub fn domain(addr: &str) -> Option<&str> {
+    addr.rsplit_once('@').map(|(_, d)| d)
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Draft {
+    pub from: String,
+    pub to: Vec<Mailbox>,
+    pub cc: Vec<Mailbox>,
+    pub subject: String,
+    pub reply_to: i64,
+}
+
+pub fn reply(original: &MessageMeta, own: &Own, fallback_from: &str, all: bool) -> Draft {
+    let from = match (&original.row.recipient, original.recipient_hosted) {
+        (Some(r), true) => r.clone(),
+        _ => fallback_from.to_string(),
+    };
+    let sent_by_me = original
+        .row
+        .from
+        .as_ref()
+        .is_some_and(|f| own.contains(&f.addr));
+    let (to, mut cc) = if sent_by_me {
+        (original.to.clone(), original.cc.clone())
+    } else if !original.reply_to.is_empty() {
+        (original.reply_to.clone(), Vec::new())
+    } else {
+        (original.row.from.iter().cloned().collect(), Vec::new())
+    };
+    if all && !sent_by_me {
+        cc.extend(original.to.iter().chain(&original.cc).cloned());
+    }
+    if !all {
+        cc.clear();
+    }
+    let mut seen: HashSet<String> = to.iter().map(|m| m.addr.clone()).collect();
+    cc.retain(|m| !own.contains(&m.addr) && seen.insert(m.addr.clone()));
+    Draft {
+        from,
+        to,
+        cc,
+        subject: reply_subject(&original.row.subject),
+        reply_to: original.row.id,
+    }
+}
+
+pub fn reply_subject(subject: &str) -> String {
+    let trimmed = subject.trim();
+    if trimmed.len() >= 3 && trimmed[..3].eq_ignore_ascii_case("re:") {
+        trimmed.to_string()
+    } else {
+        format!("Re: {trimmed}")
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Outgoing {
+    pub from: String,
+    #[serde(default)]
+    pub to: Vec<Mailbox>,
+    #[serde(default)]
+    pub cc: Vec<Mailbox>,
+    #[serde(default)]
+    pub bcc: Vec<Mailbox>,
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub text: String,
+    pub reply_to: Option<i64>,
+}
+
+pub struct Threading {
+    pub message_id: String,
+    pub parents: Vec<String>,
+}
+
+fn mailbox(m: &Mailbox) -> Result<LettreMailbox> {
+    Ok(LettreMailbox::new(
+        m.name.clone(),
+        m.addr
+            .parse()
+            .with_context(|| format!("{} is not a valid address", m.addr))?,
+    ))
+}
+
+pub fn build(
+    out: &Outgoing,
+    from: &Mailbox,
+    message_id: &str,
+    threading: Option<&Threading>,
+    keep_bcc: bool,
+) -> Result<Message> {
+    if out.to.is_empty() && out.cc.is_empty() && out.bcc.is_empty() {
+        bail!("add at least one recipient");
+    }
+    let mut b = Message::builder()
+        .from(mailbox(from)?)
+        .subject(out.subject.trim())
+        .message_id(Some(format!("<{message_id}>")))
+        .date_now();
+    for m in &out.to {
+        b = b.to(mailbox(m)?);
+    }
+    for m in &out.cc {
+        b = b.cc(mailbox(m)?);
+    }
+    for m in &out.bcc {
+        b = b.bcc(mailbox(m)?);
+    }
+    if let Some(t) = threading {
+        b = b.in_reply_to(format!("<{}>", t.message_id));
+        let refs: Vec<String> = t
+            .parents
+            .iter()
+            .chain(std::iter::once(&t.message_id))
+            .map(|id| format!("<{id}>"))
+            .collect();
+        b = b.references(refs.join(" "));
+    }
+    if keep_bcc {
+        b = b.keep_bcc();
+    }
+    Ok(b.header(ContentType::TEXT_PLAIN).body(out.text.clone())?)
+}
+
+pub async fn submit(cfg: &AccountConfig, message: &Message) -> Result<()> {
+    let login = read_secret(&cfg.login_file)?;
+    let password = read_secret(&cfg.password_file)?;
+    let (host, port) = cfg
+        .smtp
+        .rsplit_once(':')
+        .and_then(|(h, p)| Some((h, p.parse().ok()?)))
+        .with_context(|| format!("smtp must be host:port, got {}", cfg.smtp))?;
+    let hello = domain(&login).unwrap_or("localhost").to_string();
+    let transport = AsyncSmtpTransport::<Tokio1Executor>::relay(host)?
+        .port(port)
+        .hello_name(ClientId::Domain(hello))
+        .credentials(Credentials::new(login, password))
+        .build();
+    transport.send(message.clone()).await?;
+    Ok(())
+}
+
+pub fn new_message_id(from: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let seed = format!(
+        "{from}{:?}{}",
+        std::time::SystemTime::now(),
+        std::process::id()
+    );
+    let hash = hex::encode(&Sha256::digest(seed.as_bytes())[..16]);
+    format!("{hash}@{}", domain(from).unwrap_or("localhost"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::views::MessageRow;
+
+    fn mb(addr: &str) -> Mailbox {
+        Mailbox {
+            name: None,
+            addr: addr.into(),
+        }
+    }
+
+    fn own() -> Own {
+        Own {
+            addresses: HashSet::from(["old@mail.example.org".to_string()]),
+            domains: HashSet::from(["example.com".to_string()]),
+        }
+    }
+
+    fn original(
+        from: &str,
+        to: &[&str],
+        cc: &[&str],
+        recipient: &str,
+        hosted: bool,
+    ) -> MessageMeta {
+        MessageMeta {
+            row: MessageRow {
+                id: 7,
+                thread: 1,
+                date: 0,
+                folder: "inbox".into(),
+                from: Some(mb(from)),
+                subject: "Plans".into(),
+                snippet: String::new(),
+                recipient: Some(recipient.into()),
+                unread: false,
+                flagged: false,
+                answered: false,
+                attachments: false,
+            },
+            message_id: "1@x".into(),
+            to: to.iter().map(|a| mb(a)).collect(),
+            cc: cc.iter().map(|a| mb(a)).collect(),
+            reply_to: Vec::new(),
+            attachment_list: Vec::new(),
+            blob: String::new(),
+            account: "catch".into(),
+            parents: Vec::new(),
+            recipient_hosted: hosted,
+        }
+    }
+
+    #[test]
+    fn replies_come_from_the_receiving_address() {
+        let o = original(
+            "a@example.net",
+            &["shop.fox@example.com"],
+            &[],
+            "shop.fox@example.com",
+            true,
+        );
+        let d = reply(&o, &own(), "catch@example.com", false);
+        assert_eq!(d.from, "shop.fox@example.com");
+        assert_eq!(d.to, vec![mb("a@example.net")]);
+        assert_eq!(d.subject, "Re: Plans");
+    }
+
+    #[test]
+    fn forwarded_mail_is_answered_from_the_mailbox() {
+        let o = original(
+            "a@example.net",
+            &["old@mail.example.org"],
+            &[],
+            "old@mail.example.org",
+            false,
+        );
+        assert_eq!(
+            reply(&o, &own(), "contact@example.com", false).from,
+            "contact@example.com"
+        );
+    }
+
+    #[test]
+    fn reply_all_drops_my_addresses_and_duplicates() {
+        let o = original(
+            "a@example.net",
+            &["me@example.com", "b@example.net", "a@example.net"],
+            &["old@mail.example.org", "c@example.net"],
+            "me@example.com",
+            true,
+        );
+        let d = reply(&o, &own(), "catch@example.com", true);
+        assert_eq!(d.to, vec![mb("a@example.net")]);
+        assert_eq!(d.cc, vec![mb("b@example.net"), mb("c@example.net")]);
+    }
+
+    #[test]
+    fn replying_to_my_own_message_goes_to_its_recipients() {
+        let o = original(
+            "me@example.com",
+            &["b@example.net"],
+            &["c@example.net"],
+            "b@example.net",
+            false,
+        );
+        let d = reply(&o, &own(), "me@example.com", true);
+        assert_eq!(d.to, vec![mb("b@example.net")]);
+        assert_eq!(d.cc, vec![mb("c@example.net")]);
+    }
+
+    #[test]
+    fn reply_to_header_wins() {
+        let mut o = original(
+            "list@example.net",
+            &["me@example.com"],
+            &[],
+            "me@example.com",
+            true,
+        );
+        o.reply_to = vec![mb("thread@example.net")];
+        assert_eq!(
+            reply(&o, &own(), "x@example.com", false).to,
+            vec![mb("thread@example.net")]
+        );
+    }
+
+    #[test]
+    fn subjects_get_one_re() {
+        assert_eq!(reply_subject("RE: x"), "RE: x");
+        assert_eq!(reply_subject(" hello "), "Re: hello");
+    }
+
+    #[test]
+    fn builds_threaded_plain_text() {
+        let out = Outgoing {
+            from: "me@example.com".into(),
+            to: vec![Mailbox {
+                name: Some("Bea".into()),
+                addr: "b@example.net".into(),
+            }],
+            cc: vec![],
+            bcc: vec![mb("hidden@example.net")],
+            subject: "Re: Plans".into(),
+            text: "sounds good".into(),
+            reply_to: Some(7),
+        };
+        let threading = Threading {
+            message_id: "2@x".into(),
+            parents: vec!["1@x".into()],
+        };
+        let from = Mailbox {
+            name: Some("Me".into()),
+            addr: "me@example.com".into(),
+        };
+        let raw = String::from_utf8(
+            build(&out, &from, "abc@example.com", Some(&threading), false)
+                .unwrap()
+                .formatted(),
+        )
+        .unwrap();
+        assert!(raw.contains("From: Me <me@example.com>\r\n"), "{raw}");
+        assert!(raw.contains("To: Bea <b@example.net>\r\n"));
+        assert!(raw.contains("Message-ID: <abc@example.com>\r\n"));
+        assert!(raw.contains("In-Reply-To: <2@x>\r\n"));
+        assert!(raw.contains("References: <1@x> <2@x>\r\n"));
+        assert!(!raw.contains("hidden@example.net"));
+        assert!(raw.ends_with("sounds good"));
+
+        let kept = String::from_utf8(
+            build(&out, &from, "abc@example.com", Some(&threading), true)
+                .unwrap()
+                .formatted(),
+        )
+        .unwrap();
+        assert!(kept.contains("Bcc: hidden@example.net\r\n"));
+    }
+
+    #[test]
+    fn needs_a_recipient_and_valid_addresses() {
+        let mut out = Outgoing {
+            from: "me@example.com".into(),
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            subject: String::new(),
+            text: String::new(),
+            reply_to: None,
+        };
+        let from = mb("me@example.com");
+        assert!(build(&out, &from, "a@example.com", None, false).is_err());
+        out.to = vec![mb("not an address")];
+        assert!(build(&out, &from, "a@example.com", None, false).is_err());
+    }
+}

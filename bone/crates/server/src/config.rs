@@ -29,6 +29,8 @@ pub struct AccountConfig {
     pub name: String,
     #[serde(default = "default_imap")]
     pub imap: String,
+    #[serde(default = "default_smtp")]
+    pub smtp: String,
     pub login_file: PathBuf,
     pub password_file: PathBuf,
 }
@@ -56,6 +58,10 @@ pub fn read_secret(path: &Path) -> Result<String> {
 
 fn default_bind() -> String {
     "127.0.0.1:8790".into()
+}
+
+fn default_smtp() -> String {
+    "smtp.migadu.com:465".into()
 }
 
 fn default_imap() -> String {

@@ -8,7 +8,7 @@ use futures_util::TryStreamExt;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver};
 
-use crate::actions::{Command, DELETED, Op};
+use crate::actions::{Command, DELETED, Op, SEEN};
 use crate::config::AccountConfig;
 use crate::db::{Db, Folder, Moved, NewMessage};
 use crate::hub::{Hub, folder_key};
@@ -303,6 +303,15 @@ impl Sync<'_> {
             .into_iter()
             .find(|f| f.id == folder_id)
             .context("that folder no longer exists")?;
+        if let Op::Append(raw) = op {
+            self.imap
+                .append(&f.path, Some(&format!("({SEEN})")), None, raw)
+                .await?;
+            self.folder(&f).await?;
+            self.hub.changed([folder_key(f.role.as_deref(), &f.path)]);
+            self.drain();
+            return Ok(());
+        }
         let mb = self.imap.select_condstore(&f.path).await?;
         if mb.uid_validity != f.uidvalidity {
             bail!("{} changed on the server, refresh and try again", f.path);
@@ -339,6 +348,7 @@ impl Sync<'_> {
             }
             Op::Delete => self.move_to(&f, uids, "trash").await?,
             Op::Move(target) => self.move_to(&f, uids, target).await?,
+            Op::Append(_) => unreachable!("handled above"),
         }
         self.drain();
         Ok(())

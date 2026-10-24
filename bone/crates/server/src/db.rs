@@ -266,12 +266,13 @@ impl Db {
         let mut tx = self.pool.begin().await?;
         for (blob, p) in items {
             let id: i64 = sqlx::query_scalar(
-                "INSERT INTO parsed (blob, version, message_id, subject, from_name, from_addr, to_json, cc_json, date, recipient, attachments_json, snippet)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "INSERT INTO parsed (blob, version, message_id, subject, from_name, from_addr, to_json, cc_json, date, recipient, attachments_json, snippet, recipient_hosted, reply_to_json, parents_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (blob) DO UPDATE SET version = excluded.version, message_id = excluded.message_id,
                     subject = excluded.subject, from_name = excluded.from_name, from_addr = excluded.from_addr,
                     to_json = excluded.to_json, cc_json = excluded.cc_json, date = excluded.date,
-                    recipient = excluded.recipient, attachments_json = excluded.attachments_json, snippet = excluded.snippet
+                    recipient = excluded.recipient, attachments_json = excluded.attachments_json, snippet = excluded.snippet,
+                    recipient_hosted = excluded.recipient_hosted, reply_to_json = excluded.reply_to_json, parents_json = excluded.parents_json
                  RETURNING id",
             )
             .bind(blob)
@@ -286,6 +287,9 @@ impl Db {
             .bind(p.recipient.as_deref())
             .bind(serde_json::to_string(&p.attachments)?)
             .bind(&p.snippet)
+            .bind(p.recipient_hosted)
+            .bind(serde_json::to_string(&p.reply_to)?)
+            .bind(serde_json::to_string(&p.parents)?)
             .fetch_one(&mut *tx)
             .await?;
 

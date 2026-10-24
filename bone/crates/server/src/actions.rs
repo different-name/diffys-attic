@@ -6,6 +6,7 @@ use tokio::sync::oneshot;
 pub const SEEN: &str = "\\Seen";
 pub const FLAGGED: &str = "\\Flagged";
 pub const DELETED: &str = "\\Deleted";
+pub const ANSWERED: &str = "\\Answered";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -15,6 +16,7 @@ pub enum Op {
     },
     Move(String),
     Delete,
+    Append(Vec<u8>),
 }
 
 impl Op {
