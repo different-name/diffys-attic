@@ -21,6 +21,7 @@
         {
           packages = {
             bone = pkgs.callPackage ./nix/package.nix { };
+            bone-web = pkgs.callPackage ./nix/web.nix { };
             default = self'.packages.bone;
           };
 
@@ -31,6 +32,8 @@
               clippy
               rustfmt
               rust-analyzer
+              nodejs
+              pnpm
               pkg-config
               openssl
               sqlite
