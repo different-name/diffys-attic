@@ -24,9 +24,11 @@ let
     inherit (cfg) bind;
     data_dir = "/var/lib/bone";
     cache_dir = "/var/cache/bone";
+    web_dir = if cfg.webDir == null then null else toString cfg.webDir;
     accounts = lib.mapAttrsToList (name: a: {
       inherit name;
       inherit (a) imap smtp;
+      catch_all = a.catchAll;
       login_file = "${credDir}/account-${name}-login";
       password_file = "${credDir}/account-${name}-password";
     }) cfg.accounts;
@@ -102,9 +104,28 @@ in
               default = "smtp.migadu.com:465";
               description = "SMTP submission server as `host:port`, connected over TLS.";
             };
+
+            catchAll = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = ''
+                Whether this mailbox receives all mail for its login's domain.
+                New addresses for services are made on that domain.
+              '';
+            };
           };
         }
       );
+    };
+
+    webDir = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = pkgs.callPackage ./web.nix { };
+      defaultText = lib.literalMD "the web client from this repository";
+      description = ''
+        Directory of a built web client, served next to the API.
+        When null, only the API is served.
+      '';
     };
 
     devices = lib.mkOption {
