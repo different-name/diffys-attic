@@ -15,6 +15,7 @@ export const [pane, setPane] = createSignal<Pane>("list");
 export const [compose, setCompose] = createSignal<ComposeState | null>(null);
 export const [notice, setNotice] = createSignal<string | null>(null);
 export const [checked, setChecked] = createSignal<ReadonlySet<number>>(new Set());
+export const [searchOpen, setSearchOpen] = createSignal(false);
 
 export const [list, setList] = createStore({
   items: [] as Conversation[],
@@ -104,8 +105,14 @@ export function checkAll() {
   setChecked(new Set(list.items.map((c) => c.thread)));
 }
 
+export function closeSearch() {
+  setSearchOpen(false);
+  if (query()) search("");
+}
+
 export function openFolder(key: string) {
   clearChecked();
+  setSearchOpen(false);
   setQuery("");
   setFolder(key);
   setSelected(null);
@@ -116,6 +123,7 @@ export function openFolder(key: string) {
 
 export function search(q: string) {
   clearChecked();
+  if (q.trim()) setSearchOpen(true);
   setQuery(q);
   setSelected(null);
   setPane("list");

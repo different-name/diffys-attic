@@ -26,9 +26,21 @@ function fitWidth(doc: Document) {
   }
 }
 
+const PHONE_FRAME = 500;
+const MIN_SCALE = 0.7;
+
+// phones lay wide mail out wider and scale it down rather than squeezing it into one column
+function scaleFor(doc: Document, width: number): number {
+  const natural = doc.documentElement.scrollWidth;
+  if (width >= PHONE_FRAME || natural <= width) return 1;
+  return Math.max(MIN_SCALE, width / natural);
+}
+
 function HtmlFrame(props: { html: string }) {
+  let wrap!: HTMLDivElement;
   let frame!: HTMLIFrameElement;
   const [height, setHeight] = createSignal(120);
+  const [scale, setScale] = createSignal(1);
   let observer: ResizeObserver | undefined;
 
   const measure = () => {
@@ -42,6 +54,7 @@ function HtmlFrame(props: { html: string }) {
     const doc = frame.contentDocument;
     if (!doc?.body || doc.readyState === "loading" || doc === observed) return;
     observed = doc;
+    setScale(scaleFor(doc, wrap.clientWidth));
     observer?.disconnect();
     observer = new ResizeObserver(measure);
     observer.observe(doc.body);
@@ -59,16 +72,21 @@ function HtmlFrame(props: { html: string }) {
   });
 
   return (
-    <iframe
-      ref={frame}
-      class="html-frame"
-      title="Message"
-      sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-      referrerpolicy="no-referrer"
-      srcdoc={frameDoc(props.html)}
-      style={{ height: `${height()}px` }}
-      onLoad={loaded}
-    />
+    <div ref={wrap} class="html-frame" style={{ height: `${Math.ceil(height() * scale())}px` }}>
+      <iframe
+        ref={frame}
+        title="Message"
+        sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+        referrerpolicy="no-referrer"
+        srcdoc={frameDoc(props.html)}
+        style={{
+          width: `${100 / scale()}%`,
+          height: `${height()}px`,
+          transform: scale() === 1 ? undefined : `scale(${scale()})`,
+        }}
+        onLoad={loaded}
+      />
+    </div>
   );
 }
 

@@ -11,6 +11,7 @@ import {
   actOn,
   checked,
   clearChecked,
+  closeSearch,
   compose,
   folder,
   loadFolders,
@@ -19,6 +20,7 @@ import {
   notice,
   open,
   pane,
+  searchOpen,
   searching,
   selected,
   setNotice,
@@ -114,6 +116,7 @@ function Mail() {
     if (drawerOpen()) closeDrawer();
     else if (checked().size) clearChecked();
     else if (compose()?.kind === "reply") setCompose(null);
+    else if (searchOpen() || searching()) closeSearch();
     else return false;
     return true;
   };

@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, on, Show } from "solid-js";
+import { createEffect, createSignal, For, on, onMount, Show } from "solid-js";
 import { local, splitQuery, when } from "./format";
 import { Icon } from "./icons";
 import { threadHref } from "./router";
@@ -9,6 +9,7 @@ import {
   checkAll,
   checked,
   clearChecked,
+  closeSearch,
   folder,
   folders,
   list,
@@ -16,8 +17,10 @@ import {
   open,
   query,
   search,
+  searchOpen,
   searching,
   selected,
+  setSearchOpen,
   toggleChecked,
 } from "./state";
 import { MoveMenu } from "./Thread";
@@ -144,6 +147,8 @@ function Row(props: { c: Conversation }) {
 }
 
 export function SearchField(props: { autofocus?: boolean; ref?: (el: HTMLInputElement) => void }) {
+  let input!: HTMLInputElement;
+  onMount(() => props.autofocus && input.focus());
   const parts = () => splitQuery(query());
   const [text, setText] = createSignal(parts().text);
   createEffect(on(query, (q) => setText(splitQuery(q).text), { defer: true }));
@@ -172,16 +177,18 @@ export function SearchField(props: { autofocus?: boolean; ref?: (el: HTMLInputEl
       </label>
       <input
         id="search"
-        ref={props.ref}
-        autofocus={props.autofocus}
+        ref={(el) => {
+          input = el;
+          props.ref?.(el);
+        }}
         placeholder={parts().chips.length ? "" : "Search"}
         value={text()}
         onInput={(e) => setText(e.currentTarget.value)}
         onKeyDown={(e) => {
           if (e.key === "Escape") {
             setText("");
-            search("");
             e.currentTarget.blur();
+            closeSearch();
           }
           if (e.key === "Backspace" && !text() && parts().chips.length) remove(parts().chips[parts().chips.length - 1]);
         }}
@@ -234,7 +241,6 @@ function SelectionBar() {
 }
 
 export function List(props: { searchRef?: (el: HTMLInputElement) => void }) {
-  const [phoneSearch, setPhoneSearch] = createSignal(false);
   const current = () => folders().find((f) => f.key === folder());
   const title = () => (searching() ? "Search" : (current()?.name ?? "Inbox"));
 
@@ -243,7 +249,15 @@ export function List(props: { searchRef?: (el: HTMLInputElement) => void }) {
       <Show when={selecting()}>
         <SelectionBar />
       </Show>
-      <div class="pane-head" hidden={selecting()}>
+      <Show when={!selecting() && (searchOpen() || searching())}>
+        <div class="pane-head search-head phone-only">
+          <button class="btn ghost icon-btn" aria-label="Close search" onClick={closeSearch}>
+            <Icon name="back" size={20} />
+          </button>
+          <SearchField autofocus={!searching()} />
+        </div>
+      </Show>
+      <div class="pane-head" classList={{ "phone-hidden": searchOpen() || searching() }} hidden={selecting()}>
         <button class="btn ghost icon-btn phone-only" aria-label="Folders" onClick={openDrawer}>
           <Icon name="menu" size={20} />
         </button>
@@ -256,15 +270,10 @@ export function List(props: { searchRef?: (el: HTMLInputElement) => void }) {
         <div class="head-search desktop-only">
           <SearchField ref={props.searchRef} />
         </div>
-        <button class="btn ghost icon-btn phone-only" style={{ "margin-left": "auto" }} aria-label="Search" onClick={() => setPhoneSearch(!phoneSearch())}>
+        <button class="btn ghost icon-btn phone-only" style={{ "margin-left": "auto" }} aria-label="Search" onClick={() => setSearchOpen(true)}>
           <Icon name="search" size={20} />
         </button>
       </div>
-      <Show when={phoneSearch() || searching()}>
-        <div class="phone-only" style={{ padding: "0 12px 10px" }}>
-          <SearchField autofocus />
-        </div>
-      </Show>
       <div
         class="rows"
         onScroll={(e) => {

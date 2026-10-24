@@ -143,7 +143,8 @@ a { color: var(--accent); }
 .message-head .time { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--meta); }
 .message-actions { display: flex; gap: 6px; align-items: center; }
 .body-text { line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 680px; }
-.html-frame { width: 100%; border: 0; border-radius: 8px; background: #ffffff; display: block; }
+.html-frame { width: 100%; border-radius: 8px; background: #ffffff; overflow: hidden; }
+.html-frame iframe { display: block; border: 0; background: #ffffff; transform-origin: 0 0; }
 .files { display: flex; gap: 8px; flex-wrap: wrap; }
 .file { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border: 1px solid var(--s0); border-radius: 8px; color: var(--text); text-decoration: none; }
 .file:hover { background: var(--s0); }
@@ -229,6 +230,9 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 2
   .menu button { height: 48px; flex: none; padding: 0 14px; font-size: 15px; }
   .menu .grip { width: 36px; height: 4px; border-radius: 2px; background: var(--s1); margin: 2px auto 10px; flex: none; }
   .pane-head.selection { gap: 4px; padding-left: 4px; }
+  .pane-head.phone-hidden { display: none; }
+  .pane-head.search-head { display: flex; padding-right: 12px; }
+  .search-head .search { min-height: 40px; }
   .pane-head.selection .count { font-size: 17px; letter-spacing: -0.01em; }
   .pane-head.selection .btn.done { width: 44px; padding: 0; justify-content: center; background: transparent; color: var(--green); }
   .pane-head.selection .btn.done:hover { background: var(--s0); }
