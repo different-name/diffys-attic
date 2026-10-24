@@ -22,6 +22,7 @@ import {
   startCompose,
   list,
 } from "./state";
+import { useRouter } from "./router";
 import { bumpThread, Thread } from "./Thread";
 
 function typing(e: KeyboardEvent) {
@@ -33,6 +34,7 @@ function Mail() {
   let searchInput: HTMLInputElement | undefined;
   let refresh: number | undefined;
 
+  useRouter();
   onMount(() => {
     void loadFolders();
     void loadList();

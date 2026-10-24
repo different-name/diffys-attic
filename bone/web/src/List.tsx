@@ -1,6 +1,7 @@
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { local, splitQuery, when } from "./format";
 import { Icon } from "./icons";
+import { threadHref } from "./router";
 import { FolderMenu } from "./Sidebar";
 import { act, folder, folders, list, loadMore, open, query, search, searching, selected } from "./state";
 import type { Conversation } from "./types";
@@ -48,7 +49,7 @@ function Row(props: { c: Conversation }) {
       </Show>
       <a
         class={`row${props.c.unread ? " unread" : ""}${selected() === props.c.thread ? " selected" : ""}`}
-        href={`#t${props.c.thread}`}
+        href={threadHref(props.c.thread)}
         style={{ transform: dx() ? `translateX(${dx()}px)` : undefined }}
         onClick={(e) => {
           e.preventDefault();
