@@ -5,88 +5,119 @@ import { Icon } from "./icons";
 import { closeCompose, compose, loadList, setNotice } from "./state";
 import type { AddressGroup, Draft, Mailbox } from "./types";
 
-function FromPicker(props: { firstContact: string; groups: AddressGroup[]; onPick: (address: string) => void; onClose: () => void }) {
-  const [service, setService] = createSignal("");
-  const [preview, setPreview] = createSignal<string | null>(null);
+type Choice = { address: string; count: number; mailbox: boolean };
+
+function FromPicker(props: {
+  firstContact: string;
+  groups: AddressGroup[];
+  focus: boolean;
+  onPick: (address: string) => void;
+  onClose: () => void;
+}) {
+  const [text, setText] = createSignal("");
+  const [making, setMaking] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  let input!: HTMLInputElement;
+
+  const all = (): Choice[] => props.groups.flatMap((g) => g.addresses);
   const catchAll = () => props.groups.some((g) => g.catch_all);
   const top = () =>
-    props.groups
-      .flatMap((g) => g.addresses)
+    all()
       .filter((a) => !a.mailbox)
-      .reduce<{ address: string; count: number } | null>((best, a) => (!best || a.count > best.count ? a : best), null)?.address;
+      .reduce<Choice | null>((best, a) => (!best || a.count > best.count ? a : best), null);
+  const rest = () =>
+    props.groups
+      .map((g) => ({ domain: g.domain, addresses: g.addresses.filter((a) => a.address !== top()?.address) }))
+      .filter((g) => g.addresses.length);
+  const needle = () => text().trim().toLowerCase();
+  const matches = () =>
+    all()
+      .filter((a) => a.address.toLowerCase().includes(needle()))
+      .sort((a, b) => b.count - a.count);
 
-  const generate = async () => {
+  onMount(() => props.focus && input.focus());
+
+  const make = async () => {
     setError(null);
+    setMaking(true);
     try {
-      const { address } = await api.newAddress(service());
-      setPreview(address);
+      const { address } = await api.newAddress(text().trim());
+      props.onPick(address);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't make an address");
+    } finally {
+      setMaking(false);
     }
   };
 
+  const Option = (o: { choice: Choice }) => (
+    <button class="option" onClick={() => props.onPick(o.choice.address)}>
+      <span class="mono">{o.choice.address}</span>
+      <span class="hint">{o.choice.mailbox ? "mailbox" : o.choice.address === top()?.address ? "most used" : ""}</span>
+    </button>
+  );
+
   return (
     <>
-      <div class="scrim phone-only" onClick={props.onClose} />
-      <div class="popover" role="dialog" aria-label="Send from" style={{ top: "44px", left: "56px" }}>
+      <div class="scrim" onClick={props.onClose} />
+      <div class="popover from-picker" role="dialog" aria-label="Send from">
+        <div class="grip phone-only" aria-hidden="true" />
+        <div class="picker-title phone-only">Send from</div>
         <Show when={props.firstContact}>
           <div class="note">You haven't written to {props.firstContact} before.</div>
         </Show>
-        <Show when={catchAll()}>
-          <form
-            class="new"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (preview()) props.onPick(preview()!);
-              else void generate();
-            }}
+        <form
+          class="find"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const first = matches()[0];
+            if (first) props.onPick(first.address);
+            else if (catchAll() && needle()) void make();
+          }}
+        >
+          <Icon name="search" size={14} />
+          <input
+            ref={input}
+            aria-label="Find an address"
+            placeholder={catchAll() ? "Find or make an address" : "Find an address"}
+            value={text()}
+            onInput={(e) => setText(e.currentTarget.value)}
+          />
+        </form>
+        <div class="options">
+          <Show
+            when={needle()}
+            fallback={
+              <>
+                <Show when={top()}>{(t) => <Option choice={t()} />}</Show>
+                <For each={rest()}>
+                  {(g) => (
+                    <>
+                      <div class="domain">{g.domain}</div>
+                      <For each={g.addresses}>{(a) => <Option choice={a} />}</For>
+                    </>
+                  )}
+                </For>
+              </>
+            }
           >
-            <label for="new-address" class="meta" style={{ "font-size": "12px" }}>
-              New address for
-            </label>
-            <div>
-              <input
-                id="new-address"
-                value={service()}
-                placeholder="shop or service"
-                onInput={(e) => {
-                  setService(e.currentTarget.value);
-                  setPreview(null);
-                }}
-                onBlur={() => service().trim() && !preview() && void generate()}
-              />
-              <button class="btn primary" type="submit" disabled={!service().trim()}>
-                Use
+            <For each={matches()}>{(a) => <Option choice={a} />}</For>
+            <Show when={catchAll()}>
+              <button class="option new" disabled={making()} onClick={() => void make()}>
+                <Icon name="plus" size={14} />
+                <span>
+                  New address for <strong>{text().trim()}</strong>
+                </span>
               </button>
-            </div>
-            <Show when={preview()}>
-              <span class="addr" style={{ "font-size": "12px" }}>
-                {preview()}
-              </span>
             </Show>
-            <Show when={error()}>
-              <span class="error" style={{ "font-size": "12px" }}>
-                {error()}
-              </span>
+            <Show when={!catchAll() && !matches().length}>
+              <div class="nothing">No address matches</div>
             </Show>
-          </form>
-        </Show>
-        <For each={props.groups}>
-          {(g) => (
-            <>
-              <div class="domain">{g.domain}</div>
-              <For each={g.addresses.slice(0, 8)}>
-                {(a) => (
-                  <button class="option" onClick={() => props.onPick(a.address)}>
-                    <span class="mono">{a.address}</span>
-                    <span class="hint">{a.mailbox ? "mailbox" : a.address === top() ? "most used" : ""}</span>
-                  </button>
-                )}
-              </For>
-            </>
-          )}
-        </For>
+          </Show>
+          <Show when={error()}>
+            <div class="nothing error">{error()}</div>
+          </Show>
+        </div>
       </div>
     </>
   );
@@ -106,6 +137,7 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
   const [subject, setSubject] = createSignal(prefill.subject ?? "");
   const [text, setText] = createSignal(prefill.body ?? "");
   const [picker, setPicker] = createSignal(false);
+  const [pickerFocus, setPickerFocus] = createSignal(false);
   const [suggestedFor, setSuggestedFor] = createSignal("");
   const [firstContact, setFirstContact] = createSignal("");
   const [sending, setSending] = createSignal(false);
@@ -136,6 +168,7 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
     if (res.suggested && !from()) setFrom(res.suggested);
     else if (!from()) {
       setFirstContact(first);
+      setPickerFocus(false);
       setPicker(true);
     }
   };
@@ -180,7 +213,12 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
           }
         >
           <div>
-            <button class={`from-btn${from() ? " set" : ""}`} onClick={() => setPicker(!picker())} aria-haspopup="dialog">
+            <button class={`from-btn${from() ? " set" : ""}`} onClick={() => {
+                setPickerFocus(true);
+                setPicker(!picker());
+              }}
+              aria-haspopup="dialog"
+            >
               <span style={{ flex: 1 }}>{from() || "Choose who this comes from"}</span>
               <Icon name={picker() ? "up" : "down"} />
             </button>
@@ -222,6 +260,7 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
       <Show when={picker() && addresses()}>
         <FromPicker
           firstContact={firstContact()}
+          focus={pickerFocus()}
           groups={addresses()!.groups}
           onPick={(a) => {
             setFrom(a);

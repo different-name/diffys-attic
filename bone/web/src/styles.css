@@ -170,14 +170,19 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 2
 
 .popover { position: absolute; z-index: 20; width: 380px; max-width: calc(100vw - 24px); max-height: min(520px, 70vh); overflow: auto; background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; padding: 6px 0 8px; display: flex; flex-direction: column; }
 .popover .note { padding: 8px 12px 10px; color: var(--meta); font-size: 12px; border-bottom: 1px solid var(--s0); }
-.popover .new { padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--s0); }
-.popover .new div { display: flex; gap: 6px; }
-.popover .new input { flex: 1; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--s1); border-radius: 6px; background: var(--base); outline: none; }
 .popover .domain { padding: 8px 12px 2px; font-family: var(--mono); font-size: 11px; color: var(--meta); }
 .popover .option { width: 100%; height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border: 0; background: transparent; color: var(--text); text-align: left; }
 .popover .option:hover, .popover .option:focus-visible { background: var(--s0); outline: none; }
 .popover .option .mono { font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .popover .option .hint { color: var(--meta); font-size: 11px; }
+.popover.from-picker { top: 44px; left: 56px; padding: 0 0 6px; overflow: hidden; }
+.from-picker .find { display: flex; align-items: center; gap: 8px; flex: none; margin: 8px; padding: 0 10px; height: 32px; border: 1px solid var(--s1); border-radius: 6px; background: var(--base); color: var(--meta); }
+.from-picker .find:focus-within { border-color: var(--accent); }
+.from-picker .find input { flex: 1; min-width: 0; border: 0; background: transparent; outline: none; color: var(--text); }
+.from-picker .options { overflow: auto; }
+.from-picker .option.new { color: var(--accent); }
+.from-picker .option.new strong { font-weight: 600; }
+.from-picker .nothing { padding: 10px 12px; color: var(--meta); font-size: 12px; }
 .scrim { position: fixed; inset: 0; z-index: 19; }
 .toolbar { position: relative; }
 .menu.anchored { top: calc(100% - 4px); right: 16px; }
@@ -223,7 +228,13 @@ mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 2
   .reply-field { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--s1); background: transparent; color: var(--meta); text-align: left; width: 100%; }
   .reply-field .addr { margin-left: auto; }
   .search { max-width: none; }
-  .popover { position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: auto; max-width: none; max-height: 75vh; border-radius: 8px 8px 0 0; padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .popover, .popover.from-picker { position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: auto; max-width: none; max-height: 85vh; border-width: 1px 0 0; border-radius: 12px 12px 0 0; padding: 8px 0 calc(12px + env(safe-area-inset-bottom)); overflow: hidden; }
+  .popover .grip { width: 36px; height: 4px; border-radius: 2px; background: var(--s1); margin: 2px auto 8px; flex: none; }
+  .from-picker .picker-title { display: block; padding: 2px 16px 6px; font-size: 16px; font-weight: 600; }
+  .from-picker .find { height: 44px; margin: 4px 12px 8px; }
+  .from-picker .note { padding: 4px 16px 8px; border-bottom: 0; }
+  .popover .domain { padding: 12px 16px 4px; }
+  .popover .option { padding: 0 16px; }
   .scrim { position: fixed; inset: 0; background: rgba(17, 17, 27, 0.6); z-index: 19; }
   .popover .option { height: 48px; }
   .menu, .menu.anchored { position: fixed; left: 0; right: 0; bottom: 0; top: auto; max-height: 75vh; overflow: auto; border-width: 1px 0 0; border-radius: 12px 12px 0 0; padding: 8px 8px calc(16px + env(safe-area-inset-bottom)); }
