@@ -27,6 +27,7 @@ pub struct Subscription {
 pub enum Notice {
     New {
         id: i64,
+        thread: i64,
         from: String,
         subject: String,
         recipient: Option<String>,
@@ -156,6 +157,7 @@ mod tests {
     fn long_subjects_are_shortened_to_fit() {
         let notice = Notice::New {
             id: 1,
+            thread: 7,
             from: "Shop".into(),
             subject: "ü".repeat(5000),
             recipient: Some("a@example.com".into()),
@@ -165,6 +167,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(v["type"], "new");
         assert_eq!(v["from"], "Shop");
+        assert_eq!(v["thread"], 7);
     }
 
     #[tokio::test]

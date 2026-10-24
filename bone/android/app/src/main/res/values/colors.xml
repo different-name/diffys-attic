@@ -1,0 +1,6 @@
+<resources>
+    <color name="base">#eff1f5</color>
+    <color name="accent">#8839ef</color>
+    <color name="icon_background">#1e1e2e</color>
+    <color name="icon_foreground">#cba6f7</color>
+</resources>

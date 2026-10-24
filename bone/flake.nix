@@ -17,7 +17,21 @@
       flake.nixosModules.server = ./nix/server.nix;
 
       perSystem =
-        { pkgs, self', ... }:
+        {
+          pkgs,
+          self',
+          system,
+          ...
+        }:
+        let
+          androidPkgs = import inputs.nixpkgs {
+            inherit system;
+            config = {
+              allowUnfree = true;
+              android_sdk.accept_license = true;
+            };
+          };
+        in
         {
           packages = {
             bone = pkgs.callPackage ./nix/package.nix { };
@@ -39,6 +53,8 @@
               sqlite
             ];
           };
+
+          devShells.android = androidPkgs.callPackage ./nix/android-shell.nix { };
         };
     };
 }

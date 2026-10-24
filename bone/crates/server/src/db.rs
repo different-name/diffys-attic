@@ -511,6 +511,7 @@ impl Db {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fresh {
     pub id: i64,
+    pub thread: i64,
     pub message_id: String,
     pub from: String,
     pub subject: String,
@@ -522,7 +523,7 @@ impl Db {
         let mut out = Vec::new();
         for blob in blobs {
             let rows = sqlx::query(
-                "SELECT m.id, p.message_id, COALESCE(p.from_name, p.from_addr, '') AS sender, p.subject, p.recipient
+                "SELECT m.id, p.thread, p.message_id, COALESCE(p.from_name, p.from_addr, '') AS sender, p.subject, p.recipient
                  FROM message m JOIN folder f ON f.id = m.folder_id JOIN parsed p ON p.blob = m.blob
                  WHERE m.blob = ? AND f.role = 'inbox' AND m.internal_date >= ?
                    AND (' ' || m.flags || ' ') NOT LIKE '% \\Seen %'",
@@ -533,6 +534,7 @@ impl Db {
             .await?;
             out.extend(rows.iter().map(|r| Fresh {
                 id: r.get("id"),
+                thread: r.get("thread"),
                 message_id: r.get("message_id"),
                 from: r.get("sender"),
                 subject: r.get("subject"),

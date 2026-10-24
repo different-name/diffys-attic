@@ -54,6 +54,7 @@ impl Notifier {
             }
             let notice = Notice::New {
                 id: fresh.id,
+                thread: fresh.thread,
                 from: fresh.from,
                 subject: fresh.subject,
                 recipient: fresh.recipient,

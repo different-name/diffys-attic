@@ -288,8 +288,7 @@ mod tests {
     #[test]
     #[ignore = "needs BONE_CORPUS pointing at a data dir"]
     fn corpus() {
-        let dir =
-            std::path::PathBuf::from(std::env::var_os("BONE_CORPUS").unwrap()).join("blobs");
+        let dir = std::path::PathBuf::from(std::env::var_os("BONE_CORPUS").unwrap()).join("blobs");
         let (mut messages, mut html, mut with_images, mut images) = (0, 0, 0, 0);
         let (mut bytes_in, mut bytes_out) = (0, 0);
         let mut slowest = std::time::Duration::ZERO;
