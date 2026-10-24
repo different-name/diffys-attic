@@ -16,6 +16,8 @@ pub struct Config {
     pub accounts: Vec<AccountConfig>,
     #[serde(default)]
     pub devices: Vec<DeviceConfig>,
+    #[serde(default)]
+    pub web_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,6 +35,8 @@ pub struct AccountConfig {
     pub imap: String,
     #[serde(default = "default_smtp")]
     pub smtp: String,
+    #[serde(default)]
+    pub catch_all: bool,
     pub login_file: PathBuf,
     pub password_file: PathBuf,
 }
@@ -99,7 +103,7 @@ mod tests {
                 "devices": [{ "name": "phone", "token_file": "/run/phone" }],
                 "accounts": [
                     { "name": "main", "login_file": "/run/login", "password_file": "/run/pass" },
-                    { "name": "catch", "imap": "imap.example.com:993", "login_file": "/run/l2", "password_file": "/run/p2" }
+                    { "name": "catch", "imap": "imap.example.com:993", "login_file": "/run/l2", "password_file": "/run/p2", "catch_all": true }
                 ]
             }"#,
         )
@@ -115,6 +119,8 @@ mod tests {
         assert_eq!(cfg.accounts[0].login_file, PathBuf::from("/run/login"));
         assert_eq!(cfg.accounts[0].password_file, PathBuf::from("/run/pass"));
         assert_eq!(cfg.accounts[1].imap, "imap.example.com:993");
+        assert!(!cfg.accounts[0].catch_all);
+        assert!(cfg.accounts[1].catch_all);
     }
 
     #[test]

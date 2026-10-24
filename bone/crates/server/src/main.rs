@@ -132,8 +132,12 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding {}", config.bind))?;
     tracing::info!("listening on {}", config.bind);
+    let mut router = api::router(app);
+    if let Some(dir) = &config.web_dir {
+        router = api::with_web(router, dir);
+    }
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, api::router(app)).await {
+        if let Err(e) = axum::serve(listener, router).await {
             tracing::error!("api server stopped: {e}");
         }
     });

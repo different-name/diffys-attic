@@ -62,6 +62,13 @@ pub struct MessageMeta {
     pub recipient_hosted: bool,
 }
 
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Conversation {
+    #[serde(flatten)]
+    pub latest: MessageRow,
+    pub messages: i64,
+}
+
 pub struct Cursor {
     pub date: i64,
     pub id: i64,
@@ -105,6 +112,40 @@ fn row(r: &SqliteRow) -> MessageRow {
 
 pub fn is_role(key: &str) -> bool {
     ROLES.iter().any(|(r, _)| *r == key)
+}
+
+fn push_filters(qb: &mut QueryBuilder<Sqlite>, folder: Option<&str>, query: &Query) {
+    if let Some(key) = query.folder.as_deref().or(folder) {
+        folder_filter(qb, key);
+    }
+    if let Some(fts) = query.fts() {
+        qb.push(" AND p.id IN (SELECT rowid FROM search WHERE search MATCH ")
+            .push_bind(fts)
+            .push(")");
+    }
+    match query.unread {
+        Some(true) => {
+            qb.push(" AND (' ' || m.flags || ' ') NOT LIKE '% \\Seen %'");
+        }
+        Some(false) => {
+            qb.push(" AND (' ' || m.flags || ' ') LIKE '% \\Seen %'");
+        }
+        None => {}
+    }
+    if query.flagged {
+        qb.push(" AND (' ' || m.flags || ' ') LIKE '% \\Flagged %'");
+    }
+    if query.attachment {
+        qb.push(" AND p.attachments_json != '[]'");
+    }
+    if let Some(t) = query.before {
+        qb.push(" AND COALESCE(p.date, m.internal_date) < ")
+            .push_bind(t);
+    }
+    if let Some(t) = query.after {
+        qb.push(" AND COALESCE(p.date, m.internal_date) >= ")
+            .push_bind(t);
+    }
 }
 
 fn folder_filter(qb: &mut QueryBuilder<Sqlite>, key: &str) {
@@ -164,33 +205,7 @@ impl Db {
         limit: u32,
     ) -> Result<Vec<MessageRow>> {
         let mut qb = QueryBuilder::<Sqlite>::new(with_row!("", "WHERE 1 = 1"));
-        if let Some(key) = query.folder.as_deref().or(folder) {
-            folder_filter(&mut qb, key);
-        }
-        if let Some(fts) = query.fts() {
-            qb.push(" AND p.id IN (SELECT rowid FROM search WHERE search MATCH ")
-                .push_bind(fts)
-                .push(")");
-        }
-        match query.unread {
-            Some(true) => qb.push(" AND (' ' || m.flags || ' ') NOT LIKE '% \\Seen %'"),
-            Some(false) => qb.push(" AND (' ' || m.flags || ' ') LIKE '% \\Seen %'"),
-            None => &mut qb,
-        };
-        if query.flagged {
-            qb.push(" AND (' ' || m.flags || ' ') LIKE '% \\Flagged %'");
-        }
-        if query.attachment {
-            qb.push(" AND p.attachments_json != '[]'");
-        }
-        if let Some(t) = query.before {
-            qb.push(" AND COALESCE(p.date, m.internal_date) < ")
-                .push_bind(t);
-        }
-        if let Some(t) = query.after {
-            qb.push(" AND COALESCE(p.date, m.internal_date) >= ")
-                .push_bind(t);
-        }
+        push_filters(&mut qb, folder, query);
         if let Some(c) = before {
             qb.push(" AND (COALESCE(p.date, m.internal_date), m.id) < (")
                 .push_bind(c.date)
@@ -202,6 +217,47 @@ impl Db {
             .push_bind(limit as i64);
         let rows = qb.build().fetch_all(&self.pool).await?;
         Ok(rows.iter().map(row).collect())
+    }
+
+    pub async fn conversations(
+        &self,
+        folder: Option<&str>,
+        query: &Query,
+        before: Option<Cursor>,
+        limit: u32,
+    ) -> Result<Vec<Conversation>> {
+        let mut qb = QueryBuilder::<Sqlite>::new("WITH base AS (");
+        qb.push(with_row!(
+            ", ((' ' || m.flags || ' ') NOT LIKE '% \\Seen %') AS is_unread",
+            "WHERE 1 = 1"
+        ));
+        push_filters(&mut qb, folder, query);
+        qb.push(
+            "), ranked AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY thread ORDER BY date DESC, id DESC) AS rn, \
+             COUNT(*) OVER (PARTITION BY thread) AS messages, MAX(is_unread) OVER (PARTITION BY thread) AS any_unread FROM base) \
+             SELECT * FROM ranked WHERE rn = 1",
+        );
+        if let Some(c) = before {
+            qb.push(" AND (date, id) < (")
+                .push_bind(c.date)
+                .push(", ")
+                .push_bind(c.id)
+                .push(")");
+        }
+        qb.push(" ORDER BY date DESC, id DESC LIMIT ")
+            .push_bind(limit as i64);
+        let rows = qb.build().fetch_all(&self.pool).await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let mut latest = row(r);
+                latest.unread = r.get::<bool, _>("any_unread");
+                Conversation {
+                    latest,
+                    messages: r.get("messages"),
+                }
+            })
+            .collect())
     }
 
     pub async fn thread(&self, thread: i64) -> Result<Vec<MessageRow>> {
@@ -323,5 +379,100 @@ impl Db {
             .iter()
             .map(|r| folder_key(r.get::<Option<&str>, _>("role"), r.get("path")))
             .collect())
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct AddressInfo {
+    pub address: String,
+    pub count: i64,
+    pub mailbox: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct AddressGroup {
+    pub domain: String,
+    pub catch_all: bool,
+    pub addresses: Vec<AddressInfo>,
+}
+
+impl Db {
+    pub async fn sendable_addresses(
+        &self,
+        logins: &[String],
+        catch_all: &[String],
+    ) -> Result<Vec<AddressGroup>> {
+        let rows = sqlx::query(
+            "SELECT recipient, COUNT(*) AS n FROM parsed WHERE recipient_hosted = 1 GROUP BY recipient",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut counts: BTreeMap<String, i64> = rows
+            .iter()
+            .map(|r| (r.get::<String, _>("recipient"), r.get::<i64, _>("n")))
+            .collect();
+        let logins: Vec<String> = logins.iter().map(|l| l.to_ascii_lowercase()).collect();
+        for login in &logins {
+            counts.entry(login.clone()).or_insert(0);
+        }
+        let mut groups: BTreeMap<String, Vec<AddressInfo>> = BTreeMap::new();
+        for (address, count) in counts {
+            let Some(domain) = crate::compose::domain(&address).map(str::to_string) else {
+                continue;
+            };
+            groups.entry(domain).or_default().push(AddressInfo {
+                mailbox: logins.contains(&address),
+                address,
+                count,
+            });
+        }
+        let mut out: Vec<AddressGroup> = groups
+            .into_iter()
+            .map(|(domain, mut addresses)| {
+                addresses.sort_by(|a, b| b.count.cmp(&a.count).then(a.address.cmp(&b.address)));
+                AddressGroup {
+                    catch_all: catch_all.contains(&domain),
+                    domain,
+                    addresses,
+                }
+            })
+            .collect();
+        out.sort_by_key(|g| -g.addresses.iter().map(|a| a.count).sum::<i64>());
+        Ok(out)
+    }
+
+    pub async fn suggested_from(
+        &self,
+        to: &str,
+        own: &crate::compose::Own,
+    ) -> Result<Option<String>> {
+        let to = to.trim().to_ascii_lowercase();
+        let received: Option<(String, i64)> = sqlx::query(
+            "SELECT recipient, COALESCE(date, 0) AS d FROM parsed
+             WHERE from_addr = ? AND recipient_hosted = 1 ORDER BY d DESC LIMIT 1",
+        )
+        .bind(&to)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|r| (r.get("recipient"), r.get("d")));
+        let pattern = format!("%\"addr\":\"{}\"%", to.replace(['%', '_'], ""));
+        let sent_rows = sqlx::query(
+            "SELECT from_addr, COALESCE(date, 0) AS d FROM parsed
+             WHERE from_addr IS NOT NULL AND (to_json LIKE ? OR cc_json LIKE ?) ORDER BY d DESC LIMIT 20",
+        )
+        .bind(&pattern)
+        .bind(&pattern)
+        .fetch_all(&self.pool)
+        .await?;
+        let sent: Option<(String, i64)> = sent_rows
+            .iter()
+            .map(|r| (r.get::<String, _>("from_addr"), r.get::<i64, _>("d")))
+            .find(|(addr, _)| own.contains(addr));
+        Ok(match (received, sent) {
+            (Some(r), Some(s)) => Some(if s.1 >= r.1 { s.0 } else { r.0 }),
+            (Some(r), None) => Some(r.0),
+            (None, Some(s)) => Some(s.0),
+            (None, None) => None,
+        })
     }
 }

@@ -60,6 +60,9 @@ pub fn router(app: App) -> Router {
     Router::new()
         .route("/api/folders", get(folders))
         .route("/api/messages", get(list))
+        .route("/api/conversations", get(conversations))
+        .route("/api/addresses", get(addresses))
+        .route("/api/addresses/new", get(new_address))
         .route("/api/messages/{id}", get(message))
         .route("/api/messages/{id}/raw", get(raw))
         .route("/api/messages/{id}/attachments/{n}", get(attachment))
@@ -152,6 +155,104 @@ async fn list(
         .then(|| messages.last().map(|m| format!("{}:{}", m.date, m.id)))
         .flatten();
     Ok(Json(json!({ "messages": messages, "next": next })))
+}
+
+async fn conversations(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    let query = Query::parse(params.get("q").map_or("", String::as_str));
+    let before = match params.get("before") {
+        Some(c) => Some(parse_cursor(c).ok_or_else(|| {
+            ApiError(StatusCode::BAD_REQUEST, "before must be <date>:<id>".into())
+        })?),
+        None => None,
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(PAGE)
+        .clamp(1, MAX_PAGE);
+    let conversations = app
+        .db
+        .conversations(
+            params.get("folder").map(String::as_str),
+            &query,
+            before,
+            limit,
+        )
+        .await?;
+    let next = (conversations.len() == limit as usize)
+        .then(|| {
+            conversations
+                .last()
+                .map(|c| format!("{}:{}", c.latest.date, c.latest.id))
+        })
+        .flatten();
+    Ok(Json(
+        json!({ "conversations": conversations, "next": next }),
+    ))
+}
+
+fn catch_all_domains(app: &App) -> Vec<String> {
+    app.outbound
+        .values()
+        .filter(|o| o.config.catch_all)
+        .filter_map(|o| compose::domain(&o.login).map(str::to_ascii_lowercase))
+        .collect()
+}
+
+async fn addresses(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    let groups = app
+        .db
+        .sendable_addresses(&logins(&app), &catch_all_domains(&app))
+        .await?;
+    let suggested = match params.get("to").filter(|t| !t.trim().is_empty()) {
+        Some(to) => {
+            let own = app.db.own(&logins(&app)).await?;
+            app.db.suggested_from(to, &own).await?
+        }
+        None => None,
+    };
+    Ok(Json(json!({ "groups": groups, "suggested": suggested })))
+}
+
+async fn new_address(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    let Some(domain) = catch_all_domains(&app).into_iter().next() else {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "none of your mailboxes takes a catch-all".into(),
+        ));
+    };
+    let own = app.db.own(&logins(&app)).await?;
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos() as u64);
+    let address = compose::new_address(
+        params.get("service").map_or("", String::as_str),
+        &domain,
+        &own.addresses,
+        seed,
+    )
+    .ok_or_else(|| {
+        ApiError(
+            StatusCode::BAD_REQUEST,
+            "type what the address is for".into(),
+        )
+    })?;
+    Ok(Json(json!({ "address": address })))
 }
 
 fn parse_cursor(s: &str) -> Option<Cursor> {
@@ -673,7 +774,10 @@ async fn push_subscribe(
         ));
     }
     app.db.add_subscription(&sub, crate::notify::now()).await?;
-    tracing::info!("push subscription added");
+    tracing::info!(
+        host = parsed.host_str().unwrap_or(""),
+        "push subscription added"
+    );
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -691,6 +795,41 @@ async fn push_unsubscribe(
     authed(&app, &headers, &params)?;
     let removed = app.db.remove_subscription(&req.endpoint).await?;
     Ok(Json(json!({ "removed": removed })))
+}
+
+pub fn with_web(router: Router, dir: &std::path::Path) -> Router {
+    let index = dir.join("index.html");
+    router
+        .fallback_service(
+            tower_http::services::ServeDir::new(dir)
+                .fallback(tower_http::services::ServeFile::new(index)),
+        )
+        .layer(axum::middleware::from_fn(web_cache))
+}
+
+// files in the nix store are all dated 1970, so html revalidated by date would never look changed
+async fn web_cache(mut request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let hashed = request.uri().path().starts_with("/assets/");
+    if !hashed {
+        request.headers_mut().remove(header::IF_MODIFIED_SINCE);
+        request.headers_mut().remove(header::IF_NONE_MATCH);
+    }
+    let mut response = next.run(request).await;
+    let html = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|v| v.as_bytes().starts_with(b"text/html"));
+    let headers = response.headers_mut();
+    if hashed {
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    } else if html {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        headers.remove(header::LAST_MODIFIED);
+    }
+    response
 }
 
 #[cfg(test)]
@@ -925,6 +1064,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conversations_group_threads() {
+        let f = fixture().await;
+        let all = json(&f, "/api/conversations").await;
+        let summary: Vec<(String, i64)> = all["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["subject"].as_str().unwrap().to_string(),
+                    c["messages"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("Receipt".to_string(), 1),
+                ("Re: Hello".to_string(), 2),
+                ("Your invoice".to_string(), 1)
+            ]
+        );
+        let hello = &all["conversations"][1];
+        assert_eq!(hello["unread"], true);
+        let inbox = json(&f, "/api/conversations?folder=inbox").await;
+        assert_eq!(inbox["conversations"].as_array().unwrap().len(), 2);
+        assert_eq!(inbox["conversations"][0]["messages"], 1);
+    }
+
+    #[tokio::test]
+    async fn addresses_and_suggestions() {
+        let mut f = fixture().await;
+        let v = json(&f, "/api/addresses?to=a@example.net").await;
+        assert_eq!(
+            v["groups"],
+            json!([{ "domain": "example.com", "catch_all": false, "addresses": [
+                { "address": "shop.fox@example.com", "count": 1, "mailbox": false }
+            ] }])
+        );
+        assert_eq!(v["suggested"], "me@example.com");
+        let (status, _, _) = get(&f, "/api/addresses/new?service=bandcamp").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let config = AccountConfig {
+            name: "catch".into(),
+            imap: String::new(),
+            smtp: String::new(),
+            login_file: "/dev/null".into(),
+            password_file: "/dev/null".into(),
+            catch_all: true,
+        };
+        f.app.outbound = Arc::new(HashMap::from([(
+            "catch".to_string(),
+            Outbound {
+                config,
+                login: "catch@example.com".into(),
+            },
+        )]));
+        let v = json(&f, "/api/addresses").await;
+        assert_eq!(v["groups"][0]["catch_all"], true);
+        assert_eq!(v["groups"][0]["addresses"][1]["mailbox"], true);
+        let v = json(&f, "/api/addresses/new?service=Band%20Camp").await;
+        let address = v["address"].as_str().unwrap();
+        assert!(address.starts_with("band-camp."), "{address}");
+        assert!(address.ends_with("@example.com"), "{address}");
+    }
+
+    #[tokio::test]
     async fn threads_span_mailboxes() {
         let f = fixture().await;
         let v = json(&f, "/api/messages?q=subject:hello").await;
@@ -1094,6 +1301,39 @@ mod tests {
         assert_eq!(
             link_inline_images(r#"<img src="cid:a&amp;b"> <img src="cid:c">"#, 7),
             r#"<img src="/api/messages/7/cid/a%26b"> <img src="/api/messages/7/cid/c">"#
+        );
+    }
+    #[tokio::test]
+    async fn web_html_is_never_cached_and_assets_are() {
+        let dir = temp();
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("index.html"), "<!doctype html>").unwrap();
+        std::fs::write(dir.join("assets/app.js"), "x").unwrap();
+        let web = with_web(Router::new(), &dir);
+        for uri in ["/", "/inbox/4"] {
+            let res = web
+                .clone()
+                .oneshot(
+                    Request::get(uri)
+                        .header(header::IF_MODIFIED_SINCE, "Thu, 01 Jan 1970 00:00:01 GMT")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{uri}");
+            assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(res.headers().get(header::LAST_MODIFIED).is_none());
+        }
+        let res = web
+            .oneshot(Request::get("/assets/app.js").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            res.headers()[header::CACHE_CONTROL]
+                .to_str()
+                .unwrap()
+                .contains("immutable")
         );
     }
 }

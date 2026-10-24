@@ -169,6 +169,37 @@ pub async fn submit(cfg: &AccountConfig, message: &Message) -> Result<()> {
     Ok(())
 }
 
+const WORDS: &[&str] = &[
+    "ant", "bat", "bee", "carp", "crab", "crow", "deer", "dove", "duck", "eel", "elk", "finch",
+    "fox", "frog", "gnat", "goat", "hare", "hawk", "heron", "ibis", "jay", "koi", "lark", "lynx",
+    "mink", "mole", "moth", "newt", "otter", "owl", "panda", "pike", "puffin", "quail", "raven",
+    "robin", "seal", "shrew", "snail", "stoat", "swan", "tern", "toad", "trout", "vole", "wasp",
+    "wolf", "wren", "yak",
+];
+
+pub fn new_address(
+    service: &str,
+    domain: &str,
+    taken: &HashSet<String>,
+    seed: u64,
+) -> Option<String> {
+    let service: String = service
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let service = service.trim_matches('-');
+    if service.is_empty() {
+        return None;
+    }
+    (0..WORDS.len()).find_map(|i| {
+        let word = WORDS[(seed as usize + i) % WORDS.len()];
+        let address = format!("{service}.{word}@{domain}");
+        (!taken.contains(&address)).then_some(address)
+    })
+}
+
 pub fn new_message_id(from: &str) -> String {
     use sha2::{Digest, Sha256};
     let seed = format!(
@@ -305,6 +336,20 @@ mod tests {
             reply(&o, &own(), "x@example.com", false).to,
             vec![mb("thread@example.net")]
         );
+    }
+
+    #[test]
+    fn new_addresses_are_clean_and_unused() {
+        let taken = HashSet::from(["shop.ant@example.com".to_string()]);
+        assert_eq!(
+            new_address(" Big Shop! ", "example.com", &taken, 0).as_deref(),
+            Some("big-shop.ant@example.com")
+        );
+        assert_eq!(
+            new_address("shop", "example.com", &taken, 0).as_deref(),
+            Some("shop.bat@example.com")
+        );
+        assert_eq!(new_address(" !! ", "example.com", &taken, 0), None);
     }
 
     #[test]
