@@ -807,25 +807,25 @@ pub fn with_web(router: Router, dir: &std::path::Path) -> Router {
         .layer(axum::middleware::from_fn(web_cache))
 }
 
-// files in the nix store are all dated 1970, so html revalidated by date would never look changed
+// files in the nix store are all dated 1970, so anything revalidated by date would never look changed
 async fn web_cache(mut request: axum::extract::Request, next: axum::middleware::Next) -> Response {
-    let hashed = request.uri().path().starts_with("/assets/");
+    let path = request.uri().path();
+    if path.starts_with("/api/") {
+        return next.run(request).await;
+    }
+    let hashed = path.starts_with("/assets/");
     if !hashed {
         request.headers_mut().remove(header::IF_MODIFIED_SINCE);
         request.headers_mut().remove(header::IF_NONE_MATCH);
     }
     let mut response = next.run(request).await;
-    let html = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .is_some_and(|v| v.as_bytes().starts_with(b"text/html"));
     let headers = response.headers_mut();
     if hashed {
         headers.insert(
             header::CACHE_CONTROL,
             HeaderValue::from_static("public, max-age=31536000, immutable"),
         );
-    } else if html {
+    } else {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         headers.remove(header::LAST_MODIFIED);
     }
@@ -1304,13 +1304,14 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn web_html_is_never_cached_and_assets_are() {
+    async fn web_files_are_never_cached_but_hashed_assets_are() {
         let dir = temp();
         std::fs::create_dir_all(dir.join("assets")).unwrap();
         std::fs::write(dir.join("index.html"), "<!doctype html>").unwrap();
         std::fs::write(dir.join("assets/app.js"), "x").unwrap();
+        std::fs::write(dir.join("favicon.svg"), "<svg/>").unwrap();
         let web = with_web(Router::new(), &dir);
-        for uri in ["/", "/inbox/4"] {
+        for uri in ["/", "/inbox/4", "/favicon.svg"] {
             let res = web
                 .clone()
                 .oneshot(
