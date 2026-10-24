@@ -24,6 +24,7 @@ use crate::compose::{self, Outgoing, Threading};
 use crate::config::AccountConfig;
 use crate::db::Db;
 use crate::hub::Hub;
+use crate::push::{Pusher, Subscription};
 use crate::query::Query;
 use crate::store::Blobs;
 use crate::views::{Cursor, MessageMeta};
@@ -40,6 +41,7 @@ pub struct App {
     pub tokens: Arc<Vec<[u8; 32]>>,
     pub accounts: Arc<HashMap<String, mpsc::Sender<Command>>>,
     pub outbound: Arc<HashMap<String, Outbound>>,
+    pub pusher: Arc<Pusher>,
 }
 
 #[derive(Clone)]
@@ -65,6 +67,8 @@ pub fn router(app: App) -> Router {
         .route("/api/actions", post(act))
         .route("/api/messages/{id}/reply", get(reply_draft))
         .route("/api/send", post(send))
+        .route("/api/push/key", get(push_key))
+        .route("/api/push", post(push_subscribe).delete(push_unsubscribe))
         .with_state(app)
 }
 
@@ -572,7 +576,7 @@ async fn events(
     QueryParams(params): Params,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     authed(&app, &headers, &params)?;
-    let stream = BroadcastStream::new(app.hub.subscribe()).map(|change| {
+    let changes = BroadcastStream::new(app.hub.subscribe()).map(|change| {
         Ok(match change {
             Ok(change) => Event::default()
                 .event("changed")
@@ -581,7 +585,62 @@ async fn events(
             Err(BroadcastStreamRecvError::Lagged(_)) => Event::default().event("resync").data(""),
         })
     });
+    let notices = BroadcastStream::new(app.hub.notices()).filter_map(|notice| async move {
+        notice.ok().map(|n| {
+            Ok(Event::default()
+                .event("new")
+                .json_data(n)
+                .unwrap_or_default())
+        })
+    });
+    let stream = futures_util::stream::select(changes, notices);
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+async fn push_key(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    Ok(Json(json!({ "key": app.pusher.public_key() })))
+}
+
+async fn push_subscribe(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+    Json(sub): Json<Subscription>,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    let parsed = url::Url::parse(&sub.endpoint)
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "endpoint is not a URL".into()))?;
+    if !matches!(parsed.scheme(), "https" | "http") || sub.p256dh.is_empty() || sub.auth.is_empty()
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "a subscription needs an http(s) endpoint, p256dh and auth".into(),
+        ));
+    }
+    app.db.add_subscription(&sub, crate::notify::now()).await?;
+    tracing::info!("push subscription added");
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct Unsubscribe {
+    endpoint: String,
+}
+
+async fn push_unsubscribe(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+    Json(req): Json<Unsubscribe>,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    let removed = app.db.remove_subscription(&req.endpoint).await?;
+    Ok(Json(json!({ "removed": removed })))
 }
 
 #[cfg(test)]
@@ -675,6 +734,7 @@ mod tests {
             tokens: Arc::new(vec![hash_token(TOKEN)]),
             accounts: Arc::new(HashMap::new()),
             outbound: Arc::new(HashMap::new()),
+            pusher: Arc::new(Pusher::open(&dir).unwrap()),
         };
         add(&app, "main", "INBOX", Some("inbox"), 1, "\\Seen",
             "From: Shop <news@shop.example.net>\nTo: me@example.com\nMessage-ID: <1@x>\nDate: Tue, 20 Oct 2026 10:00:00 +0000\nSubject: Your invoice\n\nThanks for the order").await;

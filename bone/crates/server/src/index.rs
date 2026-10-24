@@ -7,6 +7,7 @@ use tokio::sync::Notify;
 
 use crate::db::Db;
 use crate::hub::Hub;
+use crate::notify::Notifier;
 use crate::parse::{self, Parsed};
 use crate::store::Blobs;
 
@@ -17,12 +18,13 @@ pub async fn run(
     db: Db,
     blobs: Arc<Blobs>,
     hub: Arc<Hub>,
+    notifier: Arc<Notifier>,
     own_domains: HashSet<String>,
     wake: Arc<Notify>,
 ) {
     let own_domains = Arc::new(own_domains);
     loop {
-        match drain(&db, &blobs, &hub, &own_domains).await {
+        match drain(&db, &blobs, &hub, &notifier, &own_domains).await {
             Ok(_) => {
                 let _ = tokio::time::timeout(IDLE_CHECK, wake.notified()).await;
             }
@@ -38,6 +40,7 @@ async fn drain(
     db: &Db,
     blobs: &Arc<Blobs>,
     hub: &Hub,
+    notifier: &Notifier,
     own_domains: &Arc<HashSet<String>>,
 ) -> Result<usize> {
     let started = Instant::now();
@@ -64,6 +67,9 @@ async fn drain(
         db.store_parsed(parse::VERSION, &parsed).await?;
         let stored: Vec<String> = parsed.into_iter().map(|(blob, _)| blob).collect();
         hub.changed(db.folders_of_blobs(&stored).await?);
+        if let Err(e) = notifier.new_mail(&stored).await {
+            tracing::warn!("notifying failed: {e:#}");
+        }
     }
     if total > 0 {
         tracing::info!(

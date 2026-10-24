@@ -7,7 +7,9 @@ mod db;
 mod hub;
 mod imap;
 mod index;
+mod notify;
 mod parse;
+mod push;
 mod query;
 mod store;
 mod sync;
@@ -56,11 +58,18 @@ async fn main() -> Result<()> {
         }
     }
     let hub = Arc::new(Hub::new());
+    let pusher = Arc::new(push::Pusher::open(&config.data_dir)?);
+    let notifier = Arc::new(notify::Notifier {
+        db: db.clone(),
+        hub: hub.clone(),
+        pusher: pusher.clone(),
+    });
     let wake = Arc::new(Notify::new());
     tokio::spawn(index::run(
         db.clone(),
         blobs.clone(),
         hub.clone(),
+        notifier,
         own_domains,
         wake.clone(),
     ));
@@ -106,6 +115,7 @@ async fn main() -> Result<()> {
         tokens: Arc::new(tokens),
         accounts: Arc::new(accounts),
         outbound: Arc::new(outbound),
+        pusher,
     };
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
@@ -131,6 +141,7 @@ async fn sweep(db: Db, blobs: Arc<Blobs>) {
         every.tick().await;
         let result = async {
             let pruned = db.prune_parsed().await?;
+            db.prune_notified(notify::now() - 30 * 24 * 60 * 60).await?;
             let keep = db.referenced_blobs().await?;
             Ok::<_, anyhow::Error>((pruned, blobs.sweep(&keep, SWEEP_EVERY)?))
         }

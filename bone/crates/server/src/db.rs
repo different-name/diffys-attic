@@ -7,6 +7,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
 use crate::parse::{Mailbox, Parsed};
+use crate::push::Subscription;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -507,6 +508,97 @@ impl Db {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fresh {
+    pub id: i64,
+    pub message_id: String,
+    pub from: String,
+    pub subject: String,
+    pub recipient: Option<String>,
+}
+
+impl Db {
+    pub async fn fresh_inbox(&self, blobs: &[String], since: i64) -> Result<Vec<Fresh>> {
+        let mut out = Vec::new();
+        for blob in blobs {
+            let rows = sqlx::query(
+                "SELECT m.id, p.message_id, COALESCE(p.from_name, p.from_addr, '') AS sender, p.subject, p.recipient
+                 FROM message m JOIN folder f ON f.id = m.folder_id JOIN parsed p ON p.blob = m.blob
+                 WHERE m.blob = ? AND f.role = 'inbox' AND m.internal_date >= ?
+                   AND (' ' || m.flags || ' ') NOT LIKE '% \\Seen %'",
+            )
+            .bind(blob)
+            .bind(since)
+            .fetch_all(&self.pool)
+            .await?;
+            out.extend(rows.iter().map(|r| Fresh {
+                id: r.get("id"),
+                message_id: r.get("message_id"),
+                from: r.get("sender"),
+                subject: r.get("subject"),
+                recipient: r.get("recipient"),
+            }));
+        }
+        Ok(out)
+    }
+
+    pub async fn mark_notified(&self, message_id: &str, at: i64) -> Result<bool> {
+        let done = sqlx::query("INSERT OR IGNORE INTO notified (message_id, at) VALUES (?, ?)")
+            .bind(message_id)
+            .bind(at)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    pub async fn prune_notified(&self, before: i64) -> Result<u64> {
+        Ok(sqlx::query("DELETE FROM notified WHERE at < ?")
+            .bind(before)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+
+    pub async fn add_subscription(&self, sub: &Subscription, at: i64) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO push_subscription (endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?)
+             ON CONFLICT (endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth",
+        )
+        .bind(&sub.endpoint)
+        .bind(&sub.p256dh)
+        .bind(&sub.auth)
+        .bind(at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_subscription(&self, endpoint: &str) -> Result<bool> {
+        Ok(
+            sqlx::query("DELETE FROM push_subscription WHERE endpoint = ?")
+                .bind(endpoint)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                == 1,
+        )
+    }
+
+    pub async fn subscriptions(&self) -> Result<Vec<Subscription>> {
+        let rows = sqlx::query("SELECT endpoint, p256dh, auth FROM push_subscription")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| Subscription {
+                endpoint: r.get("endpoint"),
+                p256dh: r.get("p256dh"),
+                auth: r.get("auth"),
+            })
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -824,5 +916,75 @@ mod tests {
         let after = ids(db.clone()).await;
         assert_eq!(after[0], before[0]);
         assert!(after[1] > before[1]);
+    }
+
+    #[tokio::test]
+    async fn fresh_unread_inbox_mail_is_notified_once() {
+        let db = Db::memory().await.unwrap();
+        db.upsert_folder("main", "INBOX", Some("inbox"))
+            .await
+            .unwrap();
+        db.upsert_folder("main", "Archive", Some("archive"))
+            .await
+            .unwrap();
+        let folders = db.folders("main").await.unwrap();
+        let (archive, inbox) = (folders[0].id, folders[1].id);
+        let at = |uid: u32, date: i64, flags: &str| NewMessage {
+            uid,
+            modseq: 1,
+            flags: flags.into(),
+            internal_date: date,
+            size: 1,
+        };
+        db.insert_messages(
+            inbox,
+            &[at(1, 1000, ""), at(2, 10, ""), at(3, 1000, "\\Seen")],
+        )
+        .await
+        .unwrap();
+        db.insert_messages(archive, &[at(1, 1000, "")])
+            .await
+            .unwrap();
+        for (folder, uid, blob) in [
+            (inbox, 1, "new"),
+            (inbox, 2, "old"),
+            (inbox, 3, "read"),
+            (archive, 1, "filed"),
+        ] {
+            db.set_blob(folder, uid, blob).await.unwrap();
+        }
+        let items: Vec<(String, Parsed)> = ["new", "old", "read", "filed"]
+            .into_iter()
+            .map(|b| (b.to_string(), parsed(&format!("{b}@x"), &[], b)))
+            .collect();
+        db.store_parsed(1, &items).await.unwrap();
+        let blobs: Vec<String> = ["new", "old", "read", "filed"].map(String::from).to_vec();
+        let fresh = db.fresh_inbox(&blobs, 500).await.unwrap();
+        assert_eq!(
+            fresh.iter().map(|f| f.subject.as_str()).collect::<Vec<_>>(),
+            vec!["new"]
+        );
+        assert!(db.mark_notified("new@x", 1).await.unwrap());
+        assert!(!db.mark_notified("new@x", 2).await.unwrap());
+        assert_eq!(db.prune_notified(5).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn subscriptions_upsert_and_remove() {
+        let db = Db::memory().await.unwrap();
+        let sub = |auth: &str| Subscription {
+            endpoint: "https://push.example.com/up/1".into(),
+            p256dh: "key".into(),
+            auth: auth.into(),
+        };
+        db.add_subscription(&sub("a"), 1).await.unwrap();
+        db.add_subscription(&sub("b"), 2).await.unwrap();
+        assert_eq!(db.subscriptions().await.unwrap(), vec![sub("b")]);
+        assert!(
+            db.remove_subscription("https://push.example.com/up/1")
+                .await
+                .unwrap()
+        );
+        assert!(db.subscriptions().await.unwrap().is_empty());
     }
 }

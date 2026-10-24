@@ -3,6 +3,8 @@ use std::collections::BTreeSet;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+use crate::push::Notice;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Change {
     pub folders: BTreeSet<String>,
@@ -10,12 +12,14 @@ pub struct Change {
 
 pub struct Hub {
     tx: broadcast::Sender<Change>,
+    notices: broadcast::Sender<Notice>,
 }
 
 impl Hub {
     pub fn new() -> Self {
         Self {
             tx: broadcast::channel(256).0,
+            notices: broadcast::channel(64).0,
         }
     }
 
@@ -28,6 +32,14 @@ impl Hub {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Change> {
         self.tx.subscribe()
+    }
+
+    pub fn notice(&self, notice: Notice) {
+        let _ = self.notices.send(notice);
+    }
+
+    pub fn notices(&self) -> broadcast::Receiver<Notice> {
+        self.notices.subscribe()
     }
 }
 
