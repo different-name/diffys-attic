@@ -2,7 +2,7 @@ import { createResource, createSignal, For, onMount, Show } from "solid-js";
 import { api } from "./api";
 import { parseAddresses } from "./format";
 import { Icon } from "./icons";
-import { closeCompose, compose, loadList, setNotice } from "./state";
+import { addressColor, closeCompose, compose, loadList, setNotice } from "./state";
 import type { AddressGroup, Draft, Mailbox } from "./types";
 
 type Choice = { address: string; count: number; mailbox: boolean };
@@ -206,7 +206,7 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
           fallback={
             <div class="locked">
               <Icon name="lock" size={12} style={{ color: "var(--meta)" }} />
-              <span class="addr" style={{ "font-size": "12px" }}>
+              <span class="addr" style={{ "font-size": "12px", color: addressColor(replyDraft()?.from) }}>
                 {replyDraft()?.from ?? ""}
               </span>
             </div>

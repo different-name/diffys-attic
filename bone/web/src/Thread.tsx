@@ -4,7 +4,7 @@ import { Composer } from "./Composer";
 import { local, when, who } from "./format";
 import { Icon } from "./icons";
 import { MessageView } from "./Message";
-import { act, actOn, compose, folder, folders, list, searching, setList, setPane, startCompose } from "./state";
+import { act, actOn, addressColor, compose, folder, folders, list, searching, setList, setPane, startCompose } from "./state";
 import type { Row } from "./types";
 
 export const [threadVersion, bumpThread] = createSignal(0);
@@ -153,7 +153,9 @@ export function Thread(props: { thread: number }) {
           <button class="reply-field" onClick={() => startCompose({ kind: "reply", id: latest()!.id, all: false })}>
             <span>Reply</span>
             <Show when={latest()!.recipient}>
-              <span class="addr">as {local(latest()!.recipient)}</span>
+              <span class="addr" style={{ color: addressColor(latest()!.recipient) }}>
+                as {local(latest()!.recipient)}
+              </span>
             </Show>
           </button>
           <div class="row-btns">

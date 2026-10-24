@@ -14,6 +14,7 @@ import {
   closeSearch,
   compose,
   folder,
+  loadDomains,
   loadFolders,
   loadList,
   move,
@@ -46,6 +47,7 @@ function Mail() {
   onMount(() => {
     void loadFolders();
     void loadList();
+    void loadDomains();
   });
 
   const stop = listen((changed) => {

@@ -2,6 +2,7 @@ import { createEffect, createResource, createSignal, For, onCleanup, Show } from
 import { api, token, withToken } from "./api";
 import { fullWhen, local, size, who } from "./format";
 import { Icon } from "./icons";
+import { addressColor } from "./state";
 import type { Message as MessageData } from "./types";
 
 // firefox doesn't resolve 'self' to the parent origin inside srcdoc
@@ -111,7 +112,7 @@ export function MessageView(props: { id: number; onLoaded?: (m: MessageData) => 
             <Show when={m().recipient}>
               <span style={{ display: "inline-flex", gap: "8px", "align-items": "baseline" }}>
                 <span class="meta">→</span>
-                <span class="addr" style={{ "font-size": "12px" }} title={m().recipient ?? ""}>
+                <span class="addr" style={{ "font-size": "12px", color: addressColor(m().recipient) }} title={m().recipient ?? ""}>
                   {m().recipient}
                 </span>
               </span>

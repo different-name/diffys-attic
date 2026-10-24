@@ -16,6 +16,7 @@ export const [compose, setCompose] = createSignal<ComposeState | null>(null);
 export const [notice, setNotice] = createSignal<string | null>(null);
 export const [checked, setChecked] = createSignal<ReadonlySet<number>>(new Set());
 export const [searchOpen, setSearchOpen] = createSignal(false);
+export const [domainColors, setDomainColors] = createSignal<ReadonlyMap<string, string> | null>(null);
 
 export const [list, setList] = createStore({
   items: [] as Conversation[],
@@ -42,6 +43,18 @@ function settle(items: Conversation[], whole: boolean): Conversation[] {
     const l = leaving.get(c.thread);
     return !l || l.from !== from;
   });
+}
+
+export async function loadDomains() {
+  const domains = await api.domains();
+  setDomainColors(new Map(domains.map((d) => [d.domain, d.color])));
+}
+
+export function addressColor(address: string | null | undefined): string | undefined {
+  const colors = domainColors();
+  if (!colors || !address) return undefined;
+  const domain = address.slice(address.lastIndexOf("@") + 1).toLowerCase();
+  return `var(--ctp-${colors.get(domain) ?? "red"})`;
 }
 
 export async function loadFolders() {

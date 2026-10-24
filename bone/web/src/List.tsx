@@ -6,6 +6,7 @@ import { drawerSwipe, openDrawer } from "./Drawer";
 import {
   act,
   actOn,
+  addressColor,
   checkAll,
   checked,
   clearChecked,
@@ -136,7 +137,7 @@ function Row(props: { c: Conversation }) {
             <span class="subject">{props.c.subject || "(no subject)"}</span> <span class="snippet">{props.c.snippet}</span>
           </span>
           <Show when={props.c.recipient}>
-            <span class="addr" title={props.c.recipient ?? ""}>
+            <span class="addr" style={{ color: addressColor(props.c.recipient) }} title={props.c.recipient ?? ""}>
               {local(props.c.recipient)}
             </span>
           </Show>

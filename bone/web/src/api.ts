@@ -90,6 +90,7 @@ export const api = {
     }),
   addresses: (to?: string) =>
     request<{ groups: AddressGroup[]; suggested: string | null }>(`/api/addresses${qs({ to })}`),
+  domains: () => request<{ domain: string; color: string }[]>("/api/domains"),
   newAddress: (service: string) => request<{ address: string }>(`/api/addresses/new${qs({ service })}`),
 };
 

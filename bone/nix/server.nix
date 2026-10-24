@@ -29,6 +29,7 @@ let
       inherit name;
       inherit (a) imap smtp;
       catch_all = a.catchAll;
+      inherit (a) color domains;
       login_file = "${credDir}/account-${name}-login";
       password_file = "${credDir}/account-${name}-password";
     }) cfg.accounts;
@@ -111,6 +112,43 @@ in
               description = ''
                 Whether this mailbox receives all mail for its login's domain.
                 New addresses for services are made on that domain.
+              '';
+            };
+
+            color = lib.mkOption {
+              type = lib.types.nullOr (
+                lib.types.enum [
+                  "rosewater"
+                  "flamingo"
+                  "pink"
+                  "mauve"
+                  "red"
+                  "maroon"
+                  "peach"
+                  "yellow"
+                  "green"
+                  "teal"
+                  "sky"
+                  "sapphire"
+                  "blue"
+                  "lavender"
+                ]
+              );
+              default = null;
+              example = "mauve";
+              description = ''
+                Catppuccin colour for addresses on this mailbox's domains in the web client.
+                Addresses on any other domain are shown in red.
+              '';
+            };
+
+            domains = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [ ];
+              example = [ "example.dev" ];
+              description = ''
+                Domains that belong to this mailbox besides its login's domain, such as domain aliases.
+                They are shown in this mailbox's colour.
               '';
             };
           };

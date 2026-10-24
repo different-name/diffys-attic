@@ -62,6 +62,7 @@ pub fn router(app: App) -> Router {
         .route("/api/messages", get(list))
         .route("/api/conversations", get(conversations))
         .route("/api/addresses", get(addresses))
+        .route("/api/domains", get(domains))
         .route("/api/addresses/new", get(new_address))
         .route("/api/messages/{id}", get(message))
         .route("/api/messages/{id}/raw", get(raw))
@@ -566,6 +567,31 @@ async fn command(
         Ok(Ok(result)) => result,
         _ => Err("the mail server didn't answer in time".into()),
     }
+}
+
+async fn domains(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    let mut out: Vec<(String, String)> = Vec::new();
+    for o in app.outbound.values() {
+        let Some(color) = &o.config.color else {
+            continue;
+        };
+        let login = o.login.rsplit_once('@').map(|(_, d)| d.to_string());
+        for domain in login.into_iter().chain(o.config.domains.iter().cloned()) {
+            out.push((domain.to_ascii_lowercase(), color.clone()));
+        }
+    }
+    out.sort();
+    out.dedup_by(|a, b| a.0 == b.0);
+    Ok(Json(
+        out.into_iter()
+            .map(|(domain, color)| json!({ "domain": domain, "color": color }))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 fn logins(app: &App) -> Vec<String> {
@@ -1114,6 +1140,8 @@ mod tests {
             login_file: "/dev/null".into(),
             password_file: "/dev/null".into(),
             catch_all: true,
+            color: Some("mauve".into()),
+            domains: vec!["Example.dev".into()],
         };
         f.app.outbound = Arc::new(HashMap::from([(
             "catch".to_string(),
@@ -1129,6 +1157,13 @@ mod tests {
         let address = v["address"].as_str().unwrap();
         assert!(address.starts_with("band-camp."), "{address}");
         assert!(address.ends_with("@example.com"), "{address}");
+        assert_eq!(
+            json(&f, "/api/domains").await,
+            json!([
+                { "domain": "example.com", "color": "mauve" },
+                { "domain": "example.dev", "color": "mauve" }
+            ])
+        );
     }
 
     #[tokio::test]

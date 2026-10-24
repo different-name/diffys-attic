@@ -37,6 +37,10 @@ pub struct AccountConfig {
     pub smtp: String,
     #[serde(default)]
     pub catch_all: bool,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub domains: Vec<String>,
     pub login_file: PathBuf,
     pub password_file: PathBuf,
 }
