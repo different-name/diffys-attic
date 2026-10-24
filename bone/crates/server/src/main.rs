@@ -5,6 +5,7 @@ mod compose;
 mod config;
 mod db;
 mod hub;
+mod images;
 mod imap;
 mod index;
 mod notify;
@@ -59,10 +60,13 @@ async fn main() -> Result<()> {
     }
     let hub = Arc::new(Hub::new());
     let pusher = Arc::new(push::Pusher::open(&config.data_dir)?);
+    let images = Arc::new(images::Images::open(&config.data_dir, db.clone())?);
     let notifier = Arc::new(notify::Notifier {
         db: db.clone(),
         hub: hub.clone(),
         pusher: pusher.clone(),
+        images: images.clone(),
+        blobs: blobs.clone(),
     });
     let wake = Arc::new(Notify::new());
     tokio::spawn(index::run(
@@ -95,7 +99,7 @@ async fn main() -> Result<()> {
             rx,
         ));
     }
-    tokio::spawn(sweep(db.clone(), blobs.clone()));
+    tokio::spawn(sweep(db.clone(), blobs.clone(), images.clone()));
 
     if config.devices.is_empty() {
         tracing::warn!("no devices configured, the API will refuse every request");
@@ -116,6 +120,7 @@ async fn main() -> Result<()> {
         accounts: Arc::new(accounts),
         outbound: Arc::new(outbound),
         pusher,
+        images,
     };
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
@@ -135,13 +140,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn sweep(db: Db, blobs: Arc<Blobs>) {
+async fn sweep(db: Db, blobs: Arc<Blobs>, images: Arc<images::Images>) {
     let mut every = tokio::time::interval(SWEEP_EVERY);
     loop {
         every.tick().await;
         let result = async {
             let pruned = db.prune_parsed().await?;
             db.prune_notified(notify::now() - 30 * 24 * 60 * 60).await?;
+            images.sweep(90 * 24 * 60 * 60).await?;
             let keep = db.referenced_blobs().await?;
             Ok::<_, anyhow::Error>((pruned, blobs.sweep(&keep, SWEEP_EVERY)?))
         }

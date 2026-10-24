@@ -40,7 +40,7 @@ async fn drain(
     db: &Db,
     blobs: &Arc<Blobs>,
     hub: &Hub,
-    notifier: &Notifier,
+    notifier: &Arc<Notifier>,
     own_domains: &Arc<HashSet<String>>,
 ) -> Result<usize> {
     let started = Instant::now();
@@ -70,6 +70,12 @@ async fn drain(
         if let Err(e) = notifier.new_mail(&stored).await {
             tracing::warn!("notifying failed: {e:#}");
         }
+        let notifier = notifier.clone();
+        tokio::spawn(async move {
+            if let Err(e) = notifier.prefetch_images(&stored).await {
+                tracing::warn!("image prefetch failed: {e:#}");
+            }
+        });
     }
     if total > 0 {
         tracing::info!(

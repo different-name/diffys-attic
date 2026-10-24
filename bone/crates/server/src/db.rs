@@ -542,6 +542,23 @@ impl Db {
         Ok(out)
     }
 
+    pub async fn fresh_blobs(&self, blobs: &[String], since: i64) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for blob in blobs {
+            let fresh: Option<String> = sqlx::query_scalar(
+                "SELECT m.blob FROM message m JOIN folder f ON f.id = m.folder_id
+                 WHERE m.blob = ? AND m.internal_date >= ? AND COALESCE(f.role, '') NOT IN ('junk', 'trash')
+                 LIMIT 1",
+            )
+            .bind(blob)
+            .bind(since)
+            .fetch_optional(&self.pool)
+            .await?;
+            out.extend(fresh);
+        }
+        Ok(out)
+    }
+
     pub async fn mark_notified(&self, message_id: &str, at: i64) -> Result<bool> {
         let done = sqlx::query("INSERT OR IGNORE INTO notified (message_id, at) VALUES (?, ?)")
             .bind(message_id)

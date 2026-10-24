@@ -19,11 +19,12 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::actions::{ANSWERED, Command, Op, SEEN};
-use crate::clean;
+use crate::clean::{self, IMAGE_SCHEME};
 use crate::compose::{self, Outgoing, Threading};
 use crate::config::AccountConfig;
 use crate::db::Db;
 use crate::hub::Hub;
+use crate::images::Images;
 use crate::push::{Pusher, Subscription};
 use crate::query::Query;
 use crate::store::Blobs;
@@ -42,6 +43,7 @@ pub struct App {
     pub accounts: Arc<HashMap<String, mpsc::Sender<Command>>>,
     pub outbound: Arc<HashMap<String, Outbound>>,
     pub pusher: Arc<Pusher>,
+    pub images: Arc<Images>,
 }
 
 #[derive(Clone)]
@@ -68,6 +70,7 @@ pub fn router(app: App) -> Router {
         .route("/api/messages/{id}/reply", get(reply_draft))
         .route("/api/send", post(send))
         .route("/api/push/key", get(push_key))
+        .route("/api/img/{id}", get(image))
         .route("/api/push", post(push_subscribe).delete(push_unsubscribe))
         .with_state(app)
 }
@@ -191,22 +194,36 @@ async fn message(
     authed(&app, &headers, &params)?;
     let meta = app.db.message(id).await?.ok_or_else(not_found)?;
     let raw = app.blobs.get(&meta.blob)?;
-    let (html, text, remote_images) = tokio::task::spawn_blocking(move || {
+    let (html, text, remote) = tokio::task::spawn_blocking(move || {
         let Some(msg) = MessageParser::default().parse(&raw) else {
-            return (None, None, 0);
+            return (None, None, Vec::new());
         };
         let text = msg.body_text(0).map(|t| t.into_owned());
         match msg.body_html(0) {
             Some(html) => {
                 let cleaned = clean::clean_html(&html);
                 let html = link_inline_images(&cleaned.html, id);
-                (Some(html), text, cleaned.images.len())
+                (Some(html), text, cleaned.images)
             }
-            None => (None, text, 0),
+            None => (None, text, Vec::new()),
         }
     })
     .await
     .map_err(anyhow::Error::from)?;
+    let remote_images = remote.len();
+    let html = match html {
+        Some(mut html) => {
+            let ids = app.images.register(&remote).await?;
+            for (n, img) in ids.iter().enumerate().rev() {
+                html = html.replace(
+                    &format!("\"{IMAGE_SCHEME}:{n}\""),
+                    &format!("\"{}\"", app.images.path_for(img)),
+                );
+            }
+            Some(html)
+        }
+        None => None,
+    };
     Ok(Json(MessageBody {
         meta,
         html,
@@ -597,6 +614,39 @@ async fn events(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+async fn image(
+    State(app): State<App>,
+    QueryParams(params): Params,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let sig = params.get("sig").map_or("", String::as_str);
+    if !app.images.verify(&id, sig) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "bad image signature".into(),
+        ));
+    }
+    let image = app.images.get(&id).await?.ok_or_else(not_found)?;
+    let mut res = image.bytes.into_response();
+    let h = res.headers_mut();
+    if let Ok(v) = HeaderValue::from_str(&image.content_type) {
+        h.insert(header::CONTENT_TYPE, v);
+    }
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; sandbox"),
+    );
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
+    Ok(res)
+}
+
 async fn push_key(
     State(app): State<App>,
     headers: HeaderMap,
@@ -653,7 +703,6 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::clean::IMAGE_SCHEME;
     use crate::db::NewMessage;
     use crate::parse;
 
@@ -727,14 +776,16 @@ mod tests {
 
     async fn fixture() -> Fixture {
         let dir = temp();
+        let db = Db::memory().await.unwrap();
         let app = App {
-            db: Db::memory().await.unwrap(),
+            db: db.clone(),
             blobs: Arc::new(Blobs::open(&dir).unwrap()),
             hub: Arc::new(Hub::new()),
             tokens: Arc::new(vec![hash_token(TOKEN)]),
             accounts: Arc::new(HashMap::new()),
             outbound: Arc::new(HashMap::new()),
             pusher: Arc::new(Pusher::open(&dir).unwrap()),
+            images: Arc::new(Images::open(&dir, db.clone()).unwrap()),
         };
         add(&app, "main", "INBOX", Some("inbox"), 1, "\\Seen",
             "From: Shop <news@shop.example.net>\nTo: me@example.com\nMessage-ID: <1@x>\nDate: Tue, 20 Oct 2026 10:00:00 +0000\nSubject: Your invoice\n\nThanks for the order").await;
@@ -905,12 +956,19 @@ mod tests {
         let v = json(&f, "/api/messages?q=receipt").await;
         let id = v["messages"][0]["id"].as_i64().unwrap();
         let m = json(&f, &format!("/api/messages/{id}")).await;
+        let img = f
+            .app
+            .images
+            .path_for(&Images::id("https://t.example.net/open.gif"));
         assert_eq!(
             m["html"],
             format!(
-                "<p>Paid</p><img src=\"/api/messages/{id}/cid/logo%40shop\"><img src=\"{IMAGE_SCHEME}:0\">"
+                "<p>Paid</p><img src=\"/api/messages/{id}/cid/logo%40shop\"><img src=\"{img}\">"
             )
         );
+        assert!(!m["html"].as_str().unwrap().contains(IMAGE_SCHEME));
+        let (status, _, _) = get(&f, &format!("{img}x")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(m["remote_images"], 1);
         assert_eq!(m["attachment_list"][0]["name"], "receipt 1.pdf");
         assert_eq!(m["folder"], "Receipts");
