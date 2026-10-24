@@ -2,7 +2,7 @@ import { createResource, createSignal, For, onMount, Show } from "solid-js";
 import { api } from "./api";
 import { parseAddresses } from "./format";
 import { Icon } from "./icons";
-import { closeCompose, loadList, setNotice } from "./state";
+import { closeCompose, compose, loadList, setNotice } from "./state";
 import type { AddressGroup, Draft, Mailbox } from "./types";
 
 function FromPicker(props: { firstContact: string; groups: AddressGroup[]; onPick: (address: string) => void; onClose: () => void }) {
@@ -98,11 +98,13 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
     (r) => api.reply(r.id, r.all),
   );
   const [addresses] = createResource(() => api.addresses());
+  const state = compose();
+  const prefill = !props.reply && state?.kind === "new" ? (state.prefill ?? {}) : {};
   const [from, setFrom] = createSignal("");
-  const [to, setTo] = createSignal("");
-  const [cc, setCc] = createSignal("");
-  const [subject, setSubject] = createSignal("");
-  const [text, setText] = createSignal("");
+  const [to, setTo] = createSignal(prefill.to ?? "");
+  const [cc, setCc] = createSignal(prefill.cc ?? "");
+  const [subject, setSubject] = createSignal(prefill.subject ?? "");
+  const [text, setText] = createSignal(prefill.body ?? "");
   const [picker, setPicker] = createSignal(false);
   const [suggestedFor, setSuggestedFor] = createSignal("");
   const [firstContact, setFirstContact] = createSignal("");
@@ -121,7 +123,10 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
   const sender = () => replyDraft()?.from ?? from();
   const ready = () => !!sender() && (recipients().length > 0 || ccs().length > 0) && !sending();
 
-  onMount(() => body?.focus());
+  onMount(() => {
+    body?.focus();
+    if (prefill.to) void suggest();
+  });
 
   const suggest = async () => {
     const first = parseAddresses(to())[0]?.addr ?? "";

@@ -11,7 +11,15 @@ function stored(): string {
   }
 }
 
+declare global {
+  interface Window {
+    BoneAndroid?: { setToken(token: string): void };
+    boneBack?: () => boolean;
+  }
+}
+
 export const [token, setTokenSignal] = createSignal(stored());
+window.BoneAndroid?.setToken(token());
 export const [online, setOnline] = createSignal(true);
 
 export function setToken(value: string) {
@@ -20,6 +28,7 @@ export function setToken(value: string) {
     else localStorage.removeItem(KEY);
   } catch {}
   setTokenSignal(value);
+  window.BoneAndroid?.setToken(value);
 }
 
 export class ApiError extends Error {

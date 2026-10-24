@@ -4,7 +4,8 @@ import { api } from "./api";
 import type { Conversation, Folder, Op } from "./types";
 
 export type Pane = "list" | "thread" | "compose";
-export type ComposeState = { kind: "new" } | { kind: "reply"; id: number; all: boolean };
+export type Prefill = { to?: string; cc?: string; subject?: string; body?: string };
+export type ComposeState = { kind: "new"; prefill?: Prefill } | { kind: "reply"; id: number; all: boolean };
 
 export const [folders, setFolders] = createSignal<Folder[]>([]);
 export const [folder, setFolder] = createSignal("inbox");

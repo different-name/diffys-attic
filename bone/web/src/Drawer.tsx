@@ -7,6 +7,8 @@ const [open, setOpen] = createSignal(false);
 const [drag, setDrag] = createSignal<number | null>(null);
 
 export const openDrawer = () => setOpen(true);
+export const drawerOpen = open;
+export const closeDrawer = () => setOpen(false);
 
 const width = () => Math.min(300, window.innerWidth * 0.82);
 const shown = () => drag() ?? (open() ? width() : 0);

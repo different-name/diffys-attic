@@ -1,7 +1,7 @@
 import { createEffect, onCleanup, onMount, Show } from "solid-js";
 import { listen, online, token } from "./api";
 import { Composer } from "./Composer";
-import { Drawer } from "./Drawer";
+import { closeDrawer, Drawer, drawerOpen } from "./Drawer";
 import { Icon } from "./icons";
 import { List } from "./List";
 import { Sidebar } from "./Sidebar";
@@ -22,6 +22,7 @@ import {
   searching,
   selected,
   setNotice,
+  setCompose,
   setPane,
   startCompose,
   list,
@@ -108,6 +109,15 @@ function Mail() {
   };
   document.addEventListener("keydown", key);
   onCleanup(() => document.removeEventListener("keydown", key));
+
+  window.boneBack = () => {
+    if (drawerOpen()) closeDrawer();
+    else if (checked().size) clearChecked();
+    else if (compose()?.kind === "reply") setCompose(null);
+    else return false;
+    return true;
+  };
+  onCleanup(() => (window.boneBack = undefined));
 
   return (
     <div class="app">
