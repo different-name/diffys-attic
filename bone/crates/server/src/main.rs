@@ -14,6 +14,8 @@ mod push;
 mod query;
 mod store;
 mod sync;
+#[cfg(test)]
+mod testutil;
 mod views;
 mod watch;
 

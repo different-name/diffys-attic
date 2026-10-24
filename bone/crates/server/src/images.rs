@@ -341,16 +341,7 @@ mod tests {
     }
 
     fn temp() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "bone-images-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::testutil::temp_dir("images")
     }
 
     fn serve(responses: Vec<&'static [u8]>) -> (u16, std::thread::JoinHandle<usize>) {
