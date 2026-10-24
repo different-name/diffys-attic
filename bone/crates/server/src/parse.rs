@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use mail_parser::{Address, HeaderValue, Message, MessageParser, MimeHeaders};
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: i64 = 2;
+pub const VERSION: i64 = 3;
 
 const BODY_LIMIT: usize = 64 * 1024;
 const SNIPPET_LIMIT: usize = 200;
@@ -109,6 +109,19 @@ fn recipient(
     cc: &[Mailbox],
     own_domains: &HashSet<String>,
 ) -> Option<(String, bool)> {
+    // proton pass and simplelogin aliases forward into the mailbox, this keeps the alias it came in on
+    let forwarded = msg
+        .header_values("X-SimpleLogin-Type")
+        .filter_map(HeaderValue::as_text)
+        .any(|t| t.trim().eq_ignore_ascii_case("forward"));
+    if forwarded
+        && let Some(addr) = msg
+            .header_values("X-SimpleLogin-Envelope-To")
+            .filter_map(HeaderValue::as_text)
+            .find_map(first_address)
+    {
+        return Some((addr, false));
+    }
     for header in ENVELOPE_HEADERS {
         if let Some(addr) = msg
             .header_values(*header)
@@ -233,6 +246,20 @@ mod tests {
         );
         assert_eq!(p.recipient.as_deref(), Some("old@mail.example.org"));
         assert!(!p.recipient_hosted);
+    }
+
+    #[test]
+    fn alias_forwards_use_the_alias() {
+        let p = parse_str(
+            "X-Original-To: me@mail.example.org\nX-SimpleLogin-Type: Forward\nX-SimpleLogin-Envelope-To: shop.fox@alias.example\nFrom: a@example.net\nTo: <shop.fox@alias.example>\nSubject: x\n\nbody",
+        );
+        assert_eq!(p.recipient.as_deref(), Some("shop.fox@alias.example"));
+        assert!(!p.recipient_hosted);
+
+        let p = parse_str(
+            "X-Original-To: me@mail.example.org\nX-SimpleLogin-Type: Reply\nX-SimpleLogin-Envelope-To: friend@example.net\nFrom: a@example.net\nSubject: x\n\nbody",
+        );
+        assert_eq!(p.recipient.as_deref(), Some("me@mail.example.org"));
     }
 
     #[test]
