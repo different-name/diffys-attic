@@ -242,6 +242,11 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
           <input class="field" aria-label="Subject" value={subject()} onInput={(e) => setSubject(e.currentTarget.value)} />
         </Show>
       </div>
+      <Show when={props.reply && draft.error}>
+        <p class="error" style={{ padding: "8px 12px", "font-size": "12px" }}>
+          Couldn't start this reply.
+        </p>
+      </Show>
       <label class="sr" for="body">
         Message
       </label>

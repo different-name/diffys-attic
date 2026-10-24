@@ -74,7 +74,7 @@ pub fn reply(original: &MessageMeta, own: &Own, fallback_from: &str, all: bool) 
 
 pub fn reply_subject(subject: &str) -> String {
     let trimmed = subject.trim();
-    if trimmed.len() >= 3 && trimmed[..3].eq_ignore_ascii_case("re:") {
+    if trimmed.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("re:")) {
         trimmed.to_string()
     } else {
         format!("Re: {trimmed}")
@@ -355,6 +355,7 @@ mod tests {
     #[test]
     fn subjects_get_one_re() {
         assert_eq!(reply_subject("RE: x"), "RE: x");
+        assert_eq!(reply_subject("We’re ready"), "Re: We’re ready");
         assert_eq!(reply_subject(" hello "), "Re: hello");
     }
 
