@@ -16,6 +16,7 @@ import {
   list,
   loadMore,
   open,
+  openDraft,
   query,
   search,
   searchOpen,
@@ -96,6 +97,7 @@ function Row(props: { c: Conversation }) {
           e.preventDefault();
           if (pressed || horizontal) return;
           if (selecting() || e.shiftKey || e.ctrlKey || e.metaKey) toggleChecked(props.c.thread, e.shiftKey);
+          else if (props.c.folder === "drafts") void openDraft(props.c.id);
           else open(props.c.thread);
         }}
         onContextMenu={(e) => pressed && e.preventDefault()}

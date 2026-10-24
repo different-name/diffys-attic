@@ -56,4 +56,16 @@ export type Outgoing = {
   subject: string;
   text: string;
   reply_to?: number;
+  draft?: string;
+};
+
+export type SavedDraft = {
+  draft: string;
+  from: string | null;
+  to: Mailbox[];
+  cc: Mailbox[];
+  bcc: Mailbox[];
+  subject: string;
+  text: string;
+  reply_to: number | null;
 };

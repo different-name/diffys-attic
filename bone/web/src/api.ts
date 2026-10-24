@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import type { AddressGroup, Conversation, Draft, Folder, Message, Op, Outgoing, Row } from "./types";
+import type { AddressGroup, Conversation, Draft, Folder, Message, Op, Outgoing, Row, SavedDraft } from "./types";
 
 const KEY = "bone.token";
 
@@ -83,6 +83,12 @@ export const api = {
   act: (ids: number[], op: Op, folder?: string) =>
     request<{ done: number }>("/api/actions", { method: "POST", body: JSON.stringify({ ids, op, folder }) }),
   reply: (id: number, all: boolean) => request<Draft>(`/api/messages/${id}/reply${all ? "?all=1" : ""}`),
+  saveDraft: (body: Outgoing) =>
+    request<{ draft: string }>("/api/drafts", { method: "POST", body: JSON.stringify(body) }),
+  discardDraft: (draft: string) =>
+    request<{ ok: boolean }>("/api/drafts/discard", { method: "POST", body: JSON.stringify({ draft }) }),
+  draft: (draft: string) => request<SavedDraft>(`/api/draft${qs({ id: draft })}`),
+  draftOf: (id: number) => request<SavedDraft>(`/api/messages/${id}/draft`),
   send: (body: Outgoing) =>
     request<{ sent: boolean; saved: boolean; error: string | null }>("/api/send", {
       method: "POST",

@@ -1,11 +1,12 @@
 import { createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { api } from "./api";
+import { formatAddresses } from "./format";
 import type { Conversation, Folder, Op } from "./types";
 
 export type Pane = "list" | "thread" | "compose";
-export type Prefill = { to?: string; cc?: string; subject?: string; body?: string };
-export type ComposeState = { kind: "new"; prefill?: Prefill } | { kind: "reply"; id: number; all: boolean };
+export type Prefill = { to?: string; cc?: string; subject?: string; body?: string; from?: string; replyTo?: number };
+export type ComposeState = { kind: "new"; prefill?: Prefill; draft?: string } | { kind: "reply"; id: number; all: boolean };
 
 export const [folders, setFolders] = createSignal<Folder[]>([]);
 export const [folder, setFolder] = createSignal("inbox");
@@ -147,6 +148,26 @@ export function open(thread: number) {
   setSelected(thread);
   setCompose(null);
   setPane("thread");
+}
+
+export async function openDraft(id: number) {
+  try {
+    const d = await api.draftOf(id);
+    startCompose({
+      kind: "new",
+      draft: d.draft,
+      prefill: {
+        from: d.from ?? "",
+        to: formatAddresses(d.to),
+        cc: formatAddresses(d.cc),
+        subject: d.subject,
+        body: d.text,
+        replyTo: d.reply_to ?? undefined,
+      },
+    });
+  } catch {
+    setNotice("Couldn't open that draft");
+  }
 }
 
 export function startCompose(state: ComposeState) {

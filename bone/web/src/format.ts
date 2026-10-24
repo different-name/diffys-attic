@@ -38,6 +38,8 @@ export function size(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+export const formatAddresses = (list: Mailbox[]) => list.map((m) => (m.name ? `${m.name} <${m.addr}>` : m.addr)).join(", ");
+
 export function parseAddresses(input: string): Mailbox[] {
   return input
     .split(/[,;\n]/)

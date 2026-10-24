@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result, bail};
-use lettre::message::header::ContentType;
+use lettre::address::Envelope;
+use lettre::message::header::{ContentType, Header, HeaderName, HeaderValue};
 use lettre::message::{Mailbox as LettreMailbox, Message};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::extension::ClientId;
@@ -74,7 +75,10 @@ pub fn reply(original: &MessageMeta, own: &Own, fallback_from: &str, all: bool) 
 
 pub fn reply_subject(subject: &str) -> String {
     let trimmed = subject.trim();
-    if trimmed.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("re:")) {
+    if trimmed
+        .get(..3)
+        .is_some_and(|p| p.eq_ignore_ascii_case("re:"))
+    {
         trimmed.to_string()
     } else {
         format!("Re: {trimmed}")
@@ -95,6 +99,8 @@ pub struct Outgoing {
     #[serde(default)]
     pub text: String,
     pub reply_to: Option<i64>,
+    #[serde(default)]
+    pub draft: Option<String>,
 }
 
 pub struct Threading {
@@ -149,6 +155,118 @@ pub fn build(
         b = b.keep_bcc();
     }
     Ok(b.header(ContentType::TEXT_PLAIN).body(out.text.clone())?)
+}
+
+pub fn draft_id_ok(id: &str) -> bool {
+    id.len() <= 200
+        && id.contains('@')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-@+=".contains(c))
+}
+
+const UNSET_FROM: &str = "X-Bone-Unset-From";
+
+#[derive(Clone)]
+struct UnsetFrom;
+
+impl Header for UnsetFrom {
+    fn name() -> HeaderName {
+        HeaderName::new_from_ascii_str(UNSET_FROM)
+    }
+
+    fn parse(_: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self)
+    }
+
+    fn display(&self) -> HeaderValue {
+        HeaderValue::new(Self::name(), "1".into())
+    }
+}
+
+pub fn build_draft(
+    out: &Outgoing,
+    from: Option<&Mailbox>,
+    mailbox_login: &Mailbox,
+    message_id: &str,
+    threading: Option<&Threading>,
+) -> Result<Message> {
+    let sender = mailbox(from.unwrap_or(mailbox_login))?;
+    let mut b = Message::builder()
+        .from(sender.clone())
+        .subject(out.subject.trim())
+        .message_id(Some(format!("<{message_id}>")))
+        .date_now();
+    for m in out.to.iter().filter_map(|m| mailbox(m).ok()) {
+        b = b.to(m);
+    }
+    for m in out.cc.iter().filter_map(|m| mailbox(m).ok()) {
+        b = b.cc(m);
+    }
+    for m in out.bcc.iter().filter_map(|m| mailbox(m).ok()) {
+        b = b.bcc(m);
+    }
+    if let Some(t) = threading {
+        b = b.in_reply_to(format!("<{}>", t.message_id));
+        let refs: Vec<String> = t
+            .parents
+            .iter()
+            .chain(std::iter::once(&t.message_id))
+            .map(|id| format!("<{id}>"))
+            .collect();
+        b = b.references(refs.join(" "));
+    }
+    if from.is_none() {
+        b = b.header(UnsetFrom);
+    }
+    let envelope = Envelope::new(None, vec![sender.email.clone()])?;
+    Ok(b.keep_bcc()
+        .envelope(envelope)
+        .header(ContentType::TEXT_PLAIN)
+        .body(out.text.clone())?)
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct SavedDraft {
+    pub draft: String,
+    pub from: Option<String>,
+    pub to: Vec<Mailbox>,
+    pub cc: Vec<Mailbox>,
+    pub bcc: Vec<Mailbox>,
+    pub subject: String,
+    pub text: String,
+    #[serde(skip)]
+    pub in_reply_to: Option<String>,
+}
+
+pub fn read_draft(raw: &[u8]) -> Option<SavedDraft> {
+    use crate::parse::mailboxes;
+    let m = mail_parser::MessageParser::default().parse(raw)?;
+    let in_reply_to = m.in_reply_to();
+    Some(SavedDraft {
+        draft: m.message_id()?.to_string(),
+        from: if m.header_raw(UNSET_FROM).is_some() {
+            None
+        } else {
+            mailboxes(m.from()).into_iter().next().map(|b| b.addr)
+        },
+        to: mailboxes(m.to()),
+        cc: mailboxes(m.cc()),
+        bcc: mailboxes(m.bcc()),
+        subject: m.subject().unwrap_or_default().to_string(),
+        text: m
+            .body_text(0)
+            .map(|t| t.replace("\r\n", "\n").trim_end().to_string())
+            .unwrap_or_default(),
+        in_reply_to: in_reply_to
+            .as_text()
+            .or_else(|| {
+                in_reply_to
+                    .as_text_list()
+                    .and_then(|l| l.first().map(|s| s.as_ref()))
+            })
+            .map(str::to_string),
+    })
 }
 
 pub async fn submit(cfg: &AccountConfig, message: &Message) -> Result<()> {
@@ -353,6 +471,62 @@ mod tests {
     }
 
     #[test]
+    fn drafts_round_trip() {
+        let out = Outgoing {
+            from: String::new(),
+            to: vec![
+                Mailbox {
+                    name: Some("Ann".into()),
+                    addr: "ann@example.com".into(),
+                },
+                Mailbox {
+                    name: None,
+                    addr: "half@".into(),
+                },
+            ],
+            cc: vec![],
+            bcc: vec![Mailbox {
+                name: None,
+                addr: "quiet@example.com".into(),
+            }],
+            subject: "Plans ü".into(),
+            text: "line one\nline two".into(),
+            reply_to: None,
+            draft: None,
+        };
+        let login = Mailbox {
+            name: None,
+            addr: "me@example.com".into(),
+        };
+        let threading = Threading {
+            message_id: "orig@example.com".into(),
+            parents: vec![],
+        };
+        let raw = build_draft(&out, None, &login, "d1@example.com", Some(&threading))
+            .unwrap()
+            .formatted();
+        let d = read_draft(&raw).unwrap();
+        assert_eq!(d.draft, "d1@example.com");
+        assert_eq!(d.from, None);
+        assert_eq!(d.to.len(), 1);
+        assert_eq!(d.to[0].addr, "ann@example.com");
+        assert_eq!(d.bcc[0].addr, "quiet@example.com");
+        assert_eq!(d.subject, "Plans ü");
+        assert_eq!(d.text, "line one\nline two");
+        assert_eq!(d.in_reply_to.as_deref(), Some("orig@example.com"));
+
+        let raw = build_draft(&out, Some(&login), &login, "d1@example.com", None)
+            .unwrap()
+            .formatted();
+        assert_eq!(
+            read_draft(&raw).unwrap().from.as_deref(),
+            Some("me@example.com")
+        );
+        assert!(draft_id_ok("d1@example.com"));
+        assert!(!draft_id_ok("x\"y@example.com"));
+    }
+
+    #[test]
     fn subjects_get_one_re() {
         assert_eq!(reply_subject("RE: x"), "RE: x");
         assert_eq!(reply_subject("We’re ready"), "Re: We’re ready");
@@ -372,6 +546,7 @@ mod tests {
             subject: "Re: Plans".into(),
             text: "sounds good".into(),
             reply_to: Some(7),
+            draft: None,
         };
         let threading = Threading {
             message_id: "2@x".into(),
@@ -414,6 +589,7 @@ mod tests {
             subject: String::new(),
             text: String::new(),
             reply_to: None,
+            draft: None,
         };
         let from = mb("me@example.com");
         assert!(build(&out, &from, "a@example.com", None, false).is_err());

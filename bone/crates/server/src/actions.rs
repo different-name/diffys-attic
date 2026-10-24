@@ -7,6 +7,7 @@ pub const SEEN: &str = "\\Seen";
 pub const FLAGGED: &str = "\\Flagged";
 pub const DELETED: &str = "\\Deleted";
 pub const ANSWERED: &str = "\\Answered";
+pub const DRAFT: &str = "\\Draft";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -17,6 +18,11 @@ pub enum Op {
     Move(String),
     Delete,
     Append(Vec<u8>),
+    SaveDraft {
+        raw: Vec<u8>,
+        message_id: String,
+    },
+    DiscardDraft(String),
 }
 
 impl Op {

@@ -544,6 +544,28 @@ impl Db {
         Ok(out)
     }
 
+    pub async fn draft_blob(&self, message_id: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT m.blob FROM message m JOIN folder f ON f.id = m.folder_id JOIN parsed p ON p.blob = m.blob
+             WHERE f.role = 'drafts' AND p.message_id = ?
+             ORDER BY m.internal_date DESC, m.id DESC LIMIT 1",
+        )
+        .bind(message_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn id_for_message_id(&self, message_id: &str) -> Result<Option<i64>> {
+        Ok(sqlx::query_scalar(
+            "SELECT m.id FROM message m JOIN folder f ON f.id = m.folder_id JOIN parsed p ON p.blob = m.blob
+             WHERE p.message_id = ? AND COALESCE(f.role, '') NOT IN ('drafts', 'trash')
+             ORDER BY m.id LIMIT 1",
+        )
+        .bind(message_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     pub async fn fresh_blobs(&self, blobs: &[String], since: i64) -> Result<Vec<String>> {
         let mut out = Vec::new();
         for blob in blobs {

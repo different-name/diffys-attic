@@ -1,9 +1,11 @@
-import { createResource, createSignal, For, onMount, Show } from "solid-js";
+import { batch, createEffect, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { api } from "./api";
-import { parseAddresses } from "./format";
+import { formatAddresses, parseAddresses } from "./format";
 import { Icon } from "./icons";
-import { addressColor, closeCompose, compose, loadList, setNotice } from "./state";
-import type { AddressGroup, Draft, Mailbox } from "./types";
+import { addressColor, closeCompose, compose, loadList, setCompose, setNotice } from "./state";
+import type { AddressGroup, Draft, Mailbox, Outgoing, SavedDraft } from "./types";
+
+const SAVE_AFTER = 2000;
 
 type Choice = { address: string; count: number; mailbox: boolean };
 
@@ -130,8 +132,12 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
   );
   const [addresses] = createResource(() => api.addresses());
   const state = compose();
-  const prefill = !props.reply && state?.kind === "new" ? (state.prefill ?? {}) : {};
-  const [from, setFrom] = createSignal("");
+  const fresh = !props.reply && state?.kind === "new" ? state : undefined;
+  const prefill = fresh?.prefill ?? {};
+  const [from, setFrom] = createSignal(prefill.from ?? "");
+  const [replyTo, setReplyTo] = createSignal(prefill.replyTo);
+  const [draftKey, setDraftKey] = createSignal(fresh?.draft);
+  const [saveState, setSaveState] = createSignal<"" | "saving" | "saved" | "failed">("");
   const [to, setTo] = createSignal(prefill.to ?? "");
   const [cc, setCc] = createSignal(prefill.cc ?? "");
   const [subject, setSubject] = createSignal(prefill.subject ?? "");
@@ -155,10 +161,100 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
   const sender = () => replyDraft()?.from ?? from();
   const ready = () => !!sender() && (recipients().length > 0 || ccs().length > 0) && !sending();
 
+  const payload = (): Outgoing => {
+    const d = replyDraft();
+    return {
+      from: sender(),
+      to: recipients(),
+      cc: ccs(),
+      bcc: [],
+      subject: d ? d.subject : subject(),
+      text: text(),
+      reply_to: d?.reply_to ?? replyTo(),
+    };
+  };
+  const hasContent = () => !!text().trim() || (!props.reply && !!(subject().trim() || to().trim() || cc().trim()));
+
+  let timer: number | undefined;
+  let inflight = false;
+  let again = false;
+  let lastSaved = "";
+  let finished = false;
+  let discarded = false;
+
+  const save = async () => {
+    if (finished || !hasContent()) return;
+    const body = payload();
+    const snapshot = JSON.stringify(body);
+    if (snapshot === lastSaved) return;
+    if (inflight) {
+      again = true;
+      return;
+    }
+    inflight = true;
+    setSaveState("saving");
+    try {
+      const res = await api.saveDraft({ ...body, draft: draftKey() });
+      lastSaved = snapshot;
+      setDraftKey(res.draft);
+      setSaveState("saved");
+      if (discarded) void api.discardDraft(res.draft);
+      const c = compose();
+      if (!props.reply && c?.kind === "new" && c.draft !== res.draft) setCompose({ ...c, draft: res.draft });
+    } catch {
+      setSaveState("failed");
+    } finally {
+      inflight = false;
+      if (again) {
+        again = false;
+        void save();
+      }
+    }
+  };
+
+  createEffect(
+    on(
+      () => JSON.stringify(payload()),
+      () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => void save(), SAVE_AFTER);
+      },
+      { defer: true },
+    ),
+  );
+  onCleanup(() => {
+    window.clearTimeout(timer);
+    void save();
+  });
+
+  const fill = (d: SavedDraft) => {
+    batch(() => {
+      setFrom(d.from ?? "");
+      setTo(formatAddresses(d.to));
+      setCc(formatAddresses(d.cc));
+      setSubject(d.subject);
+      setText(d.text);
+      setReplyTo(d.reply_to ?? undefined);
+    });
+    lastSaved = JSON.stringify(payload());
+  };
+
   onMount(() => {
     body?.focus();
-    if (prefill.to) void suggest();
+    if (prefill.to && !prefill.from) void suggest();
+    const key = fresh?.draft;
+    if (key && !fresh?.prefill) void api.draft(key).then(fill, () => undefined);
+    else if (key) lastSaved = JSON.stringify(payload());
   });
+
+  const discard = () => {
+    finished = true;
+    discarded = true;
+    window.clearTimeout(timer);
+    const key = draftKey();
+    if (key) void api.discardDraft(key).catch(() => setNotice("Couldn't delete the draft"));
+    closeCompose();
+  };
 
   const suggest = async () => {
     const first = parseAddresses(to())[0]?.addr ?? "";
@@ -185,8 +281,11 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
         bcc: [],
         subject: d ? d.subject : subject(),
         text: text(),
-        reply_to: d?.reply_to,
+        reply_to: d?.reply_to ?? replyTo(),
+        draft: draftKey(),
       });
+      finished = true;
+      window.clearTimeout(timer);
       setNotice(res.saved ? "Sent" : `Sent, but not saved to Sent: ${res.error}`);
       closeCompose();
       void loadList();
@@ -252,9 +351,14 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
       </label>
       <textarea id="body" ref={body} rows={props.pane ? 12 : 4} placeholder={props.reply ? "Write a reply" : "Write a message"} value={text()} onInput={(e) => setText(e.currentTarget.value)} />
       <div class="foot">
-        <button class="btn ghost" onClick={closeCompose}>
+        <button class="btn ghost" onClick={discard}>
           Discard
         </button>
+        <Show when={saveState()}>
+          <span class="mono meta" style={{ "font-size": "11px" }} role="status">
+            {saveState() === "saving" ? "Saving" : saveState() === "saved" ? "Saved" : "Not saved"}
+          </span>
+        </Show>
         <span class="mono meta desktop-only" style={{ "font-size": "11px" }}>
           ctrl enter
         </span>

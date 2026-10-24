@@ -142,7 +142,7 @@ fn first_address(value: &str) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-fn mailboxes(addr: Option<&Address<'_>>) -> Vec<Mailbox> {
+pub fn mailboxes(addr: Option<&Address<'_>>) -> Vec<Mailbox> {
     let Some(addr) = addr else {
         return Vec::new();
     };

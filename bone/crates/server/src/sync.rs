@@ -8,7 +8,7 @@ use futures_util::TryStreamExt;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver};
 
-use crate::actions::{Command, DELETED, Op, SEEN};
+use crate::actions::{Command, DELETED, DRAFT, Op, SEEN};
 use crate::config::AccountConfig;
 use crate::db::{Db, Folder, Moved, NewMessage};
 use crate::hub::{Hub, folder_key};
@@ -303,14 +303,27 @@ impl Sync<'_> {
             .into_iter()
             .find(|f| f.id == folder_id)
             .context("that folder no longer exists")?;
-        if let Op::Append(raw) = op {
-            self.imap
-                .append(&f.path, Some(&format!("({SEEN})")), None, raw)
-                .await?;
-            self.folder(&f).await?;
-            self.hub.changed([folder_key(f.role.as_deref(), &f.path)]);
-            self.drain();
-            return Ok(());
+        match op {
+            Op::Append(raw) => {
+                self.imap
+                    .append(&f.path, Some(&format!("({SEEN})")), None, raw)
+                    .await?;
+                return self.appended(&f).await;
+            }
+            Op::SaveDraft { raw, message_id } => {
+                let old = self.drafts_with(&f, message_id).await?;
+                self.imap
+                    .append(&f.path, Some(&format!("({SEEN} {DRAFT})")), None, raw)
+                    .await?;
+                self.expunge(&f, &old).await?;
+                return self.appended(&f).await;
+            }
+            Op::DiscardDraft(message_id) => {
+                let old = self.drafts_with(&f, message_id).await?;
+                self.expunge(&f, &old).await?;
+                return self.appended(&f).await;
+            }
+            _ => {}
         }
         let mb = self.imap.select_condstore(&f.path).await?;
         if mb.uid_validity != f.uidvalidity {
@@ -348,9 +361,46 @@ impl Sync<'_> {
             }
             Op::Delete => self.move_to(&f, uids, "trash").await?,
             Op::Move(target) => self.move_to(&f, uids, target).await?,
-            Op::Append(_) => unreachable!("handled above"),
+            Op::Append(_) | Op::SaveDraft { .. } | Op::DiscardDraft(_) => {
+                unreachable!("handled above")
+            }
         }
         self.drain();
+        Ok(())
+    }
+
+    async fn appended(&mut self, f: &Folder) -> Result<()> {
+        self.folder(f).await?;
+        self.hub.changed([folder_key(f.role.as_deref(), &f.path)]);
+        self.drain();
+        Ok(())
+    }
+
+    async fn drafts_with(&mut self, f: &Folder, message_id: &str) -> Result<Vec<u32>> {
+        self.imap.select(&f.path).await?;
+        let found = self
+            .imap
+            .uid_search(format!("HEADER Message-ID \"{message_id}\""))
+            .await?;
+        Ok(found.into_iter().collect())
+    }
+
+    async fn expunge(&mut self, f: &Folder, uids: &[u32]) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let set = imap::uid_set(uids);
+        self.imap
+            .uid_store(&set, format!("+FLAGS.SILENT ({DELETED})"))
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+        self.imap
+            .uid_expunge(&set)
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+        self.db.remove_messages(f.id, uids).await?;
         Ok(())
     }
 

@@ -63,6 +63,10 @@ pub fn router(app: App) -> Router {
         .route("/api/conversations", get(conversations))
         .route("/api/addresses", get(addresses))
         .route("/api/domains", get(domains))
+        .route("/api/drafts", post(save_draft))
+        .route("/api/drafts/discard", post(discard_draft))
+        .route("/api/draft", get(draft_by_message_id))
+        .route("/api/messages/{id}/draft", get(draft_of_message))
         .route("/api/addresses/new", get(new_address))
         .route("/api/messages/{id}", get(message))
         .route("/api/messages/{id}/raw", get(raw))
@@ -594,6 +598,180 @@ async fn domains(
     ))
 }
 
+async fn sending_account(app: &App, from_addr: &str) -> ApiResult<String> {
+    let bad = |m: String| ApiError(StatusCode::BAD_REQUEST, m);
+    let own = app.db.own(&logins(app)).await?;
+    if !own.contains(from_addr) {
+        return Err(bad(format!("{from_addr} isn't one of your addresses")));
+    }
+    let from_domain = compose::domain(from_addr)
+        .ok_or_else(|| bad(format!("{from_addr} is not a valid address")))?;
+    Ok(match app.db.sender_account(from_domain).await? {
+        Some(a) => a,
+        None => app
+            .outbound
+            .iter()
+            .find(|(_, o)| compose::domain(&o.login) == Some(from_domain))
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| bad(format!("none of your mailboxes can send as {from_addr}")))?,
+    })
+}
+
+async fn drafts_folder(app: &App, account: &str) -> ApiResult<Option<i64>> {
+    Ok(app
+        .db
+        .folders(account)
+        .await?
+        .into_iter()
+        .find(|f| f.role.as_deref() == Some("drafts"))
+        .map(|f| f.id))
+}
+
+async fn discard_everywhere(app: &App, message_id: &str) {
+    for account in app.outbound.keys() {
+        let Ok(Some(folder)) = drafts_folder(app, account).await else {
+            continue;
+        };
+        let op = Op::DiscardDraft(message_id.to_string());
+        if let Err(e) = command(app, account, folder, Vec::new(), op).await {
+            tracing::warn!(account, "couldn't remove a draft: {e}");
+        }
+    }
+}
+
+async fn save_draft(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+    Json(out): Json<Outgoing>,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    let bad = |m: String| ApiError(StatusCode::BAD_REQUEST, m);
+    let from_addr = out.from.trim().to_ascii_lowercase();
+    let account = if from_addr.is_empty() {
+        app.outbound
+            .iter()
+            .find(|(_, o)| o.config.catch_all)
+            .or_else(|| app.outbound.iter().next())
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| anyhow::anyhow!("no mailboxes are configured"))?
+    } else {
+        sending_account(&app, &from_addr).await?
+    };
+    let outbound = app
+        .outbound
+        .get(&account)
+        .ok_or_else(|| anyhow::anyhow!("no config for account {account}"))?;
+    let message_id = match &out.draft {
+        Some(id) if compose::draft_id_ok(id) => id.clone(),
+        Some(_) => return Err(bad("that isn't a draft id".into())),
+        None => compose::new_message_id(&outbound.login),
+    };
+    let threading = match out.reply_to {
+        Some(id) => app.db.message(id).await?.map(|o| Threading {
+            message_id: o.message_id.clone(),
+            parents: o.parents.clone(),
+        }),
+        None => None,
+    };
+    let from = match from_addr.is_empty() {
+        true => None,
+        false => Some(crate::parse::Mailbox {
+            name: app.db.display_name(&from_addr).await?,
+            addr: from_addr.clone(),
+        }),
+    };
+    let login = crate::parse::Mailbox {
+        name: None,
+        addr: outbound.login.clone(),
+    };
+    let raw = compose::build_draft(&out, from.as_ref(), &login, &message_id, threading.as_ref())
+        .map_err(|e| bad(format!("{e:#}")))?
+        .formatted();
+    if out.draft.is_some() {
+        for other in app.outbound.keys().filter(|name| **name != account) {
+            if let Some(folder) = drafts_folder(&app, other).await? {
+                let op = Op::DiscardDraft(message_id.clone());
+                if let Err(e) = command(&app, other, folder, Vec::new(), op).await {
+                    tracing::warn!(account = other, "couldn't remove a moved draft: {e}");
+                }
+            }
+        }
+    }
+    let folder = drafts_folder(&app, &account)
+        .await?
+        .ok_or_else(|| bad("this mailbox has no Drafts folder".into()))?;
+    let op = Op::SaveDraft {
+        raw,
+        message_id: message_id.clone(),
+    };
+    command(&app, &account, folder, Vec::new(), op)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(json!({ "draft": message_id })))
+}
+
+#[derive(Deserialize)]
+struct DraftRef {
+    draft: String,
+}
+
+async fn discard_draft(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+    Json(req): Json<DraftRef>,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    if !compose::draft_id_ok(&req.draft) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "that isn't a draft id".into(),
+        ));
+    }
+    discard_everywhere(&app, &req.draft).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn saved_draft(app: &App, blob: Option<String>) -> ApiResult<Json<serde_json::Value>> {
+    let raw = app.blobs.get(&blob.ok_or_else(not_found)?)?;
+    let draft = compose::read_draft(&raw).ok_or_else(not_found)?;
+    let reply_to = match &draft.in_reply_to {
+        Some(id) => app.db.id_for_message_id(id).await?,
+        None => None,
+    };
+    let mut v = serde_json::to_value(&draft).map_err(anyhow::Error::from)?;
+    v["reply_to"] = json!(reply_to);
+    Ok(Json(v))
+}
+
+async fn draft_by_message_id(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    let id = params.get("id").map(String::as_str).unwrap_or_default();
+    if !compose::draft_id_ok(id) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "that isn't a draft id".into(),
+        ));
+    }
+    saved_draft(&app, app.db.draft_blob(id).await?).await
+}
+
+async fn draft_of_message(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+    Path(id): Path<i64>,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    let meta = app.db.message(id).await?.ok_or_else(not_found)?;
+    saved_draft(&app, Some(meta.blob)).await
+}
+
 fn logins(app: &App) -> Vec<String> {
     app.outbound.values().map(|o| o.login.clone()).collect()
 }
@@ -625,21 +803,12 @@ async fn send(
     authed(&app, &headers, &params)?;
     let bad = |m: String| ApiError(StatusCode::BAD_REQUEST, m);
     let from_addr = out.from.trim().to_ascii_lowercase();
-    let own = app.db.own(&logins(&app)).await?;
-    if !own.contains(&from_addr) {
-        return Err(bad(format!("{from_addr} isn't one of your addresses")));
+    let account = sending_account(&app, &from_addr).await?;
+    if let Some(id) = &out.draft
+        && !compose::draft_id_ok(id)
+    {
+        return Err(bad("that isn't a draft id".into()));
     }
-    let from_domain = compose::domain(&from_addr)
-        .ok_or_else(|| bad(format!("{from_addr} is not a valid address")))?;
-    let account = match app.db.sender_account(from_domain).await? {
-        Some(a) => a,
-        None => app
-            .outbound
-            .iter()
-            .find(|(_, o)| compose::domain(&o.login) == Some(from_domain))
-            .map(|(name, _)| name.clone())
-            .ok_or_else(|| bad(format!("none of your mailboxes can send as {from_addr}")))?,
-    };
     let outbound = app
         .outbound
         .get(&account)
@@ -694,6 +863,9 @@ async fn send(
     };
     if let Err(e) = &saved {
         tracing::warn!(account, "sent but not saved to Sent: {e}");
+    }
+    if let Some(id) = &out.draft {
+        discard_everywhere(&app, id).await;
     }
     if let Some(o) = &original
         && let Some(l) = app.db.locate(&[o.row.id]).await?.into_iter().next()
@@ -1229,9 +1401,17 @@ mod tests {
     }
 
     async fn post(app: App, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        post_to(app, "/api/actions", body).await
+    }
+
+    async fn post_to(
+        app: App,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
         let res = router(app)
             .oneshot(
-                Request::post("/api/actions")
+                Request::post(path)
                     .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(body.to_string()))
@@ -1242,6 +1422,89 @@ mod tests {
         let status = res.status();
         let body = res.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&body).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn drafts_go_to_the_mailbox_drafts_folder() {
+        let mut f = fixture().await;
+        let (tx, mut rx) = mpsc::channel::<Command>(8);
+        f.app.accounts = Arc::new(HashMap::from([("catch".to_string(), tx)]));
+        let config = AccountConfig {
+            name: "catch".into(),
+            imap: String::new(),
+            smtp: String::new(),
+            login_file: "/dev/null".into(),
+            password_file: "/dev/null".into(),
+            catch_all: true,
+            color: None,
+            domains: Vec::new(),
+        };
+        f.app.outbound = Arc::new(HashMap::from([(
+            "catch".to_string(),
+            Outbound {
+                config,
+                login: "catch@example.com".into(),
+            },
+        )]));
+        f.app
+            .db
+            .upsert_folder("catch", "Drafts", Some("drafts"))
+            .await
+            .unwrap();
+        let drafts = f.app.db.folders("catch").await.unwrap()[0].id;
+        let worker = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            while let Some(cmd) = rx.recv().await {
+                seen.push((cmd.folder_id, cmd.op.clone()));
+                let _ = cmd.reply.send(Ok(()));
+            }
+            seen
+        });
+
+        let (status, v) = post_to(
+            f.app.clone(),
+            "/api/drafts",
+            json!({ "from": "", "to": [{ "name": null, "addr": "ann@example.com" }], "subject": "Hi", "text": "Draft body" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = v["draft"].as_str().unwrap().to_string();
+        assert!(id.ends_with("@example.com"), "{id}");
+
+        let (status, _) = post_to(
+            f.app.clone(),
+            "/api/drafts",
+            json!({ "from": "", "subject": "Hi again", "draft": id }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = post_to(
+            f.app.clone(),
+            "/api/drafts",
+            json!({ "from": "", "draft": "bad\"id@x" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) =
+            post_to(f.app.clone(), "/api/drafts/discard", json!({ "draft": id })).await;
+        assert_eq!(status, StatusCode::OK);
+
+        drop(f);
+        let seen = worker.await.unwrap();
+        assert_eq!(seen.len(), 3);
+        assert!(seen.iter().all(|(folder, _)| *folder == drafts));
+        match &seen[0].1 {
+            Op::SaveDraft { raw, message_id } => {
+                assert_eq!(*message_id, id);
+                let saved = compose::read_draft(raw).unwrap();
+                assert_eq!(saved.from, None);
+                assert_eq!(saved.to[0].addr, "ann@example.com");
+                assert_eq!(saved.text, "Draft body");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(&seen[1].1, Op::SaveDraft { message_id, .. } if *message_id == id));
+        assert_eq!(seen[2].1, Op::DiscardDraft(id));
     }
 
     #[tokio::test]
