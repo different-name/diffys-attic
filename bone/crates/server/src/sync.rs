@@ -5,10 +5,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use async_imap::types::{Fetch, Name};
 use futures_util::TryStreamExt;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::config::AccountConfig;
 use crate::db::{Db, Folder, NewMessage};
+use crate::hub::{Hub, folder_key};
 use crate::imap::{self, Session};
 use crate::store::Blobs;
 use crate::watch::{self, Event};
@@ -21,13 +23,19 @@ const BODY_BATCH: u32 = 50;
 // a bigger arrival is left to the backfill so it can't hold up other folders
 const LIVE_BODIES: usize = 200;
 
-pub async fn run(cfg: AccountConfig, db: Db, blobs: Arc<Blobs>) {
+pub async fn run(
+    cfg: AccountConfig,
+    db: Db,
+    blobs: Arc<Blobs>,
+    hub: Arc<Hub>,
+    indexer: Arc<Notify>,
+) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     tokio::spawn(watch::run(cfg.clone(), tx));
     let mut backoff = Duration::from_secs(5);
     loop {
         let started = tokio::time::Instant::now();
-        if let Err(e) = session(&cfg, &db, &blobs, &mut rx).await {
+        if let Err(e) = session(&cfg, &db, &blobs, &hub, &indexer, &mut rx).await {
             tracing::warn!(account = cfg.name, "sync failed: {e:#}");
         }
         if started.elapsed() > MAX_BACKOFF {
@@ -42,12 +50,16 @@ async fn session(
     cfg: &AccountConfig,
     db: &Db,
     blobs: &Blobs,
+    hub: &Hub,
+    indexer: &Notify,
     rx: &mut UnboundedReceiver<Event>,
 ) -> Result<()> {
     let mut sync = Sync {
         account: &cfg.name,
         db,
         blobs,
+        hub,
+        indexer,
         imap: imap::connect(cfg).await?,
         backfilled: 0,
     };
@@ -101,6 +113,8 @@ struct Sync<'a> {
     account: &'a str,
     db: &'a Db,
     blobs: &'a Blobs,
+    hub: &'a Hub,
+    indexer: &'a Notify,
     imap: Session,
     backfilled: usize,
 }
@@ -239,6 +253,9 @@ impl Sync<'_> {
 
         self.db.set_folder_state(f.id, next, highest).await?;
         let added = new_uids.len();
+        if changed + removed > 0 {
+            self.hub.changed([folder_key(f.role.as_deref(), &f.path)]);
+        }
         if added + changed + removed > 0 {
             tracing::info!(
                 account = self.account,
@@ -309,6 +326,9 @@ impl Sync<'_> {
                     got += 1;
                 }
             }
+        }
+        if got > 0 {
+            self.indexer.notify_one();
         }
         Ok(got)
     }

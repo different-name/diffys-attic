@@ -6,10 +6,21 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default = "default_bind")]
+    pub bind: String,
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
     #[serde(default)]
     pub accounts: Vec<AccountConfig>,
+    #[serde(default)]
+    pub devices: Vec<DeviceConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceConfig {
+    pub name: String,
+    pub token_file: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,6 +54,10 @@ pub fn read_secret(path: &Path) -> Result<String> {
     Ok(s.trim().to_string())
 }
 
+fn default_bind() -> String {
+    "127.0.0.1:8790".into()
+}
+
 fn default_imap() -> String {
     "imap.migadu.com:993".into()
 }
@@ -66,7 +81,9 @@ mod tests {
     fn parses_full_example() {
         let cfg = Config::parse(
             r#"{
+                "bind": "127.0.0.1:9000",
                 "data_dir": "/var/lib/bone",
+                "devices": [{ "name": "phone", "token_file": "/run/phone" }],
                 "accounts": [
                     { "name": "main", "login_file": "/run/login", "password_file": "/run/pass" },
                     { "name": "catch", "imap": "imap.example.com:993", "login_file": "/run/l2", "password_file": "/run/p2" }
@@ -74,7 +91,10 @@ mod tests {
             }"#,
         )
         .unwrap();
+        assert_eq!(cfg.bind, "127.0.0.1:9000");
         assert_eq!(cfg.data_dir, PathBuf::from("/var/lib/bone"));
+        assert_eq!(cfg.devices[0].name, "phone");
+        assert_eq!(cfg.devices[0].token_file, PathBuf::from("/run/phone"));
         assert_eq!(cfg.accounts.len(), 2);
         assert_eq!(cfg.accounts[0].name, "main");
         assert_eq!(cfg.accounts[0].imap, "imap.migadu.com:993");

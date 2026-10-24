@@ -1,20 +1,30 @@
+mod api;
+mod clean;
 mod config;
 mod db;
+mod hub;
 mod imap;
+mod index;
+mod parse;
+mod query;
 mod store;
 mod sync;
+mod views;
 mod watch;
 
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::Notify;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::Config;
+use crate::config::{Config, read_secret};
 use crate::db::Db;
+use crate::hub::Hub;
 use crate::store::Blobs;
 
 const SWEEP_EVERY: Duration = Duration::from_secs(60 * 60);
@@ -36,10 +46,60 @@ async fn main() -> Result<()> {
     let db = Db::open(&config.data_dir.join("bone.db")).await?;
     let blobs = Arc::new(Blobs::open(&config.data_dir)?);
 
+    let mut own_domains = HashSet::new();
     for account in &config.accounts {
-        tokio::spawn(sync::run(account.clone(), db.clone(), blobs.clone()));
+        let login = read_secret(&account.login_file)?;
+        if let Some((_, domain)) = login.rsplit_once('@') {
+            own_domains.insert(domain.to_ascii_lowercase());
+        }
     }
-    tokio::spawn(sweep(db, blobs));
+    let hub = Arc::new(Hub::new());
+    let wake = Arc::new(Notify::new());
+    tokio::spawn(index::run(
+        db.clone(),
+        blobs.clone(),
+        hub.clone(),
+        own_domains,
+        wake.clone(),
+    ));
+
+    for account in &config.accounts {
+        tokio::spawn(sync::run(
+            account.clone(),
+            db.clone(),
+            blobs.clone(),
+            hub.clone(),
+            wake.clone(),
+        ));
+    }
+    tokio::spawn(sweep(db.clone(), blobs.clone()));
+
+    if config.devices.is_empty() {
+        tracing::warn!("no devices configured, the API will refuse every request");
+    } else {
+        let names: Vec<&str> = config.devices.iter().map(|d| d.name.as_str()).collect();
+        tracing::info!("api devices: {}", names.join(", "));
+    }
+    let tokens = config
+        .devices
+        .iter()
+        .map(|d| read_secret(&d.token_file).map(|t| api::hash_token(&t)))
+        .collect::<Result<Vec<_>>>()?;
+    let app = api::App {
+        db,
+        blobs,
+        hub,
+        tokens: Arc::new(tokens),
+    };
+    let listener = tokio::net::TcpListener::bind(&config.bind)
+        .await
+        .with_context(|| format!("binding {}", config.bind))?;
+    tracing::info!("listening on {}", config.bind);
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, api::router(app)).await {
+            tracing::error!("api server stopped: {e}");
+        }
+    });
 
     let mut term = signal(SignalKind::terminate())?;
     tokio::select! {
@@ -54,13 +114,16 @@ async fn sweep(db: Db, blobs: Arc<Blobs>) {
     loop {
         every.tick().await;
         let result = async {
+            let pruned = db.prune_parsed().await?;
             let keep = db.referenced_blobs().await?;
-            blobs.sweep(&keep, SWEEP_EVERY)
+            Ok::<_, anyhow::Error>((pruned, blobs.sweep(&keep, SWEEP_EVERY)?))
         }
         .await;
         match result {
-            Ok(0) => {}
-            Ok(n) => tracing::info!(removed = n, "swept unreferenced messages"),
+            Ok((0, 0)) => {}
+            Ok((pruned, removed)) => {
+                tracing::info!(pruned, removed, "swept unreferenced messages")
+            }
             Err(e) => tracing::warn!("blob sweep failed: {e:#}"),
         }
     }

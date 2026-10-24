@@ -33,7 +33,6 @@ impl Blobs {
         Ok(id)
     }
 
-    #[cfg(test)]
     pub fn get(&self, id: &str) -> Result<Vec<u8>> {
         Ok(std::fs::read(self.path(id))?)
     }

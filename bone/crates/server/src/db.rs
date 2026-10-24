@@ -6,11 +6,13 @@ use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
+use crate::parse::{Mailbox, Parsed};
+
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone)]
 pub struct Db {
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -248,6 +250,139 @@ impl Db {
     }
 }
 
+impl Db {
+    pub async fn unparsed(&self, version: i64, limit: u32) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT DISTINCT m.blob FROM message m LEFT JOIN parsed p ON p.blob = m.blob
+             WHERE m.blob IS NOT NULL AND (p.blob IS NULL OR p.version < ?) LIMIT ?",
+        )
+        .bind(version)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn store_parsed(&self, version: i64, items: &[(String, Parsed)]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for (blob, p) in items {
+            let id: i64 = sqlx::query_scalar(
+                "INSERT INTO parsed (blob, version, message_id, subject, from_name, from_addr, to_json, cc_json, date, recipient, attachments_json, snippet)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (blob) DO UPDATE SET version = excluded.version, message_id = excluded.message_id,
+                    subject = excluded.subject, from_name = excluded.from_name, from_addr = excluded.from_addr,
+                    to_json = excluded.to_json, cc_json = excluded.cc_json, date = excluded.date,
+                    recipient = excluded.recipient, attachments_json = excluded.attachments_json, snippet = excluded.snippet
+                 RETURNING id",
+            )
+            .bind(blob)
+            .bind(version)
+            .bind(&p.message_id)
+            .bind(&p.subject)
+            .bind(p.from.as_ref().and_then(|f| f.name.as_deref()))
+            .bind(p.from.as_ref().map(|f| f.addr.as_str()))
+            .bind(serde_json::to_string(&p.to)?)
+            .bind(serde_json::to_string(&p.cc)?)
+            .bind(p.date)
+            .bind(p.recipient.as_deref())
+            .bind(serde_json::to_string(&p.attachments)?)
+            .bind(&p.snippet)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            let mut threads: Vec<i64> = Vec::new();
+            for msgid in p.thread_ids() {
+                let t: Option<i64> =
+                    sqlx::query_scalar("SELECT thread FROM thread_ref WHERE msgid = ?")
+                        .bind(msgid)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                threads.extend(t);
+            }
+            let target = threads.iter().copied().min().unwrap_or(id);
+            for t in threads.iter().copied().filter(|t| *t != target) {
+                sqlx::query("UPDATE parsed SET thread = ? WHERE thread = ?")
+                    .bind(target)
+                    .bind(t)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("UPDATE thread_ref SET thread = ? WHERE thread = ?")
+                    .bind(target)
+                    .bind(t)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            sqlx::query("UPDATE parsed SET thread = ? WHERE id = ?")
+                .bind(target)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            for msgid in p.thread_ids() {
+                sqlx::query("INSERT OR REPLACE INTO thread_ref (msgid, thread) VALUES (?, ?)")
+                    .bind(msgid)
+                    .bind(target)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+
+            sqlx::query("DELETE FROM search WHERE rowid = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                "INSERT INTO search (rowid, subject, sender, recipients, body, attachments) VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(&p.subject)
+            .bind(p.from.as_ref().map(search_text).unwrap_or_default())
+            .bind(
+                p.to.iter()
+                    .chain(&p.cc)
+                    .map(search_text)
+                    .chain(p.recipient.clone())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+            .bind(&p.body)
+            .bind(
+                p.attachments
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn prune_parsed(&self) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM search WHERE rowid IN (SELECT id FROM parsed WHERE blob NOT IN
+             (SELECT blob FROM message WHERE blob IS NOT NULL))",
+        )
+        .execute(&mut *tx)
+        .await?;
+        let removed = sqlx::query(
+            "DELETE FROM parsed WHERE blob NOT IN (SELECT blob FROM message WHERE blob IS NOT NULL)",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(removed)
+    }
+}
+
+fn search_text(m: &Mailbox) -> String {
+    match &m.name {
+        Some(name) => format!("{name} {}", m.addr),
+        None => m.addr.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,5 +496,121 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    fn parsed(id: &str, parents: &[&str], subject: &str) -> Parsed {
+        Parsed {
+            message_id: id.into(),
+            parents: parents.iter().map(|p| p.to_string()).collect(),
+            subject: subject.into(),
+            body: format!("body of {subject}"),
+            ..Default::default()
+        }
+    }
+
+    async fn search(db: &Db, q: &str) -> Vec<String> {
+        db.list(None, &crate::query::Query::parse(q), None, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.subject)
+            .collect()
+    }
+
+    async fn thread_of(db: &Db, blob: &str) -> i64 {
+        sqlx::query_scalar("SELECT thread FROM parsed WHERE blob = ?")
+            .bind(blob)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn with_blobs(db: &Db, blobs: &[&str]) {
+        let f = folder(db).await;
+        let msgs: Vec<NewMessage> = (1..=blobs.len() as u32).map(|u| msg(u, "")).collect();
+        db.insert_messages(f.id, &msgs).await.unwrap();
+        for (i, b) in blobs.iter().enumerate() {
+            db.set_blob(f.id, i as u32 + 1, b).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn threads_join_through_references_in_any_order() {
+        let db = Db::memory().await.unwrap();
+        with_blobs(&db, &["c", "a", "x", "b"]).await;
+        db.store_parsed(
+            1,
+            &[("c".into(), parsed("3@x", &["1@x", "2@x"], "Re: plan"))],
+        )
+        .await
+        .unwrap();
+        db.store_parsed(1, &[("a".into(), parsed("1@x", &[], "plan"))])
+            .await
+            .unwrap();
+        db.store_parsed(1, &[("x".into(), parsed("9@y", &[], "other"))])
+            .await
+            .unwrap();
+        assert_eq!(thread_of(&db, "a").await, thread_of(&db, "c").await);
+        assert_ne!(thread_of(&db, "a").await, thread_of(&db, "x").await);
+
+        db.store_parsed(1, &[("b".into(), parsed("4@y", &["9@y", "3@x"], "merge"))])
+            .await
+            .unwrap();
+        let t = thread_of(&db, "a").await;
+        for blob in ["b", "c", "x"] {
+            assert_eq!(thread_of(&db, blob).await, t);
+        }
+    }
+
+    #[tokio::test]
+    async fn search_finds_words_and_prefixes_and_survives_reparse() {
+        let db = Db::memory().await.unwrap();
+        with_blobs(&db, &["a", "b"]).await;
+        let mut invoice = parsed("1@x", &[], "Your invoice");
+        invoice.from = Some(Mailbox {
+            name: Some("Billing Team".into()),
+            addr: "billing@shop.example.net".into(),
+        });
+        db.store_parsed(
+            1,
+            &[
+                ("a".into(), invoice.clone()),
+                ("b".into(), parsed("2@x", &[], "Café night")),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(search(&db, "invoice").await, vec!["Your invoice"]);
+        assert_eq!(search(&db, "billing tea").await, vec!["Your invoice"]);
+        assert_eq!(search(&db, "cafe").await, vec!["Café night"]);
+        assert_eq!(search(&db, "\"quoted\" OR").await, Vec::<String>::new());
+        assert!(search(&db, "   ").await.len() == 2);
+
+        invoice.subject = "Your receipt".into();
+        invoice.body = "paid".into();
+        db.store_parsed(2, &[("a".into(), invoice)]).await.unwrap();
+        assert!(search(&db, "invoice").await.is_empty());
+        assert_eq!(search(&db, "receipt").await, vec!["Your receipt"]);
+        assert_eq!(db.unparsed(2, 10).await.unwrap(), vec!["b"]);
+    }
+
+    #[tokio::test]
+    async fn pruning_drops_parsed_rows_of_removed_messages() {
+        let db = Db::memory().await.unwrap();
+        with_blobs(&db, &["a", "b"]).await;
+        db.store_parsed(
+            1,
+            &[
+                ("a".into(), parsed("1@x", &[], "keep")),
+                ("b".into(), parsed("2@x", &[], "gone")),
+            ],
+        )
+        .await
+        .unwrap();
+        let f = db.folders("main").await.unwrap().remove(0);
+        db.remove_messages(f.id, &[2]).await.unwrap();
+        assert_eq!(db.prune_parsed().await.unwrap(), 1);
+        assert!(search(&db, "gone").await.is_empty());
+        assert_eq!(search(&db, "keep").await, vec!["keep"]);
     }
 }
