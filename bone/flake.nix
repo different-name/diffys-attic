@@ -14,9 +14,16 @@
         "aarch64-linux"
       ];
 
+      flake.nixosModules.server = ./nix/server.nix;
+
       perSystem =
-        { pkgs, ... }:
+        { pkgs, self', ... }:
         {
+          packages = {
+            bone = pkgs.callPackage ./nix/package.nix { };
+            default = self'.packages.bone;
+          };
+
           devShells.default = pkgs.mkShell {
             packages = with pkgs; [
               cargo
