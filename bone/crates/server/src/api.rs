@@ -785,7 +785,7 @@ mod tests {
             accounts: Arc::new(HashMap::new()),
             outbound: Arc::new(HashMap::new()),
             pusher: Arc::new(Pusher::open(&dir).unwrap()),
-            images: Arc::new(Images::open(&dir, db.clone()).unwrap()),
+            images: Arc::new(Images::open(&dir, &dir, db.clone()).unwrap()),
         };
         add(&app, "main", "INBOX", Some("inbox"), 1, "\\Seen",
             "From: Shop <news@shop.example.net>\nTo: me@example.com\nMessage-ID: <1@x>\nDate: Tue, 20 Oct 2026 10:00:00 +0000\nSubject: Your invoice\n\nThanks for the order").await;

@@ -11,6 +11,8 @@ pub struct Config {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
     #[serde(default)]
+    pub cache_dir: Option<PathBuf>,
+    #[serde(default)]
     pub accounts: Vec<AccountConfig>,
     #[serde(default)]
     pub devices: Vec<DeviceConfig>,
@@ -44,6 +46,10 @@ impl Config {
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
         Self::parse(&text).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    pub fn cache_dir(&self) -> &Path {
+        self.cache_dir.as_deref().unwrap_or(&self.data_dir)
     }
 
     fn parse(text: &str) -> Result<Self> {
@@ -89,6 +95,7 @@ mod tests {
             r#"{
                 "bind": "127.0.0.1:9000",
                 "data_dir": "/var/lib/bone",
+                "cache_dir": "/var/cache/bone",
                 "devices": [{ "name": "phone", "token_file": "/run/phone" }],
                 "accounts": [
                     { "name": "main", "login_file": "/run/login", "password_file": "/run/pass" },
@@ -99,6 +106,7 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.bind, "127.0.0.1:9000");
         assert_eq!(cfg.data_dir, PathBuf::from("/var/lib/bone"));
+        assert_eq!(cfg.cache_dir(), Path::new("/var/cache/bone"));
         assert_eq!(cfg.devices[0].name, "phone");
         assert_eq!(cfg.devices[0].token_file, PathBuf::from("/run/phone"));
         assert_eq!(cfg.accounts.len(), 2);

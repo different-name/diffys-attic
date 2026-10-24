@@ -32,12 +32,12 @@ pub struct Image {
 }
 
 impl Images {
-    pub fn open(data_dir: &Path, db: Db) -> Result<Self> {
-        Self::build(data_dir, db, false)
+    pub fn open(data_dir: &Path, cache_dir: &Path, db: Db) -> Result<Self> {
+        Self::build(data_dir, cache_dir, db, false)
     }
 
-    fn build(data_dir: &Path, db: Db, allow_private: bool) -> Result<Self> {
-        let dir = data_dir.join("images");
+    fn build(data_dir: &Path, cache_dir: &Path, db: Db, allow_private: bool) -> Result<Self> {
+        let dir = cache_dir.join("images");
         std::fs::create_dir_all(&dir)?;
         let key_path = data_dir.join("image.key");
         let key = if key_path.exists() {
@@ -373,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn signed_paths_verify_and_reject_tampering() {
         let dir = temp();
-        let images = Images::open(&dir, Db::memory().await.unwrap()).unwrap();
+        let images = Images::open(&dir, &dir, Db::memory().await.unwrap()).unwrap();
         let id = Images::id("https://img.example.com/a.png");
         let path = images.path_for(&id);
         let sig = path.split("sig=").nth(1).unwrap();
@@ -386,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn the_real_client_refuses_local_addresses() {
         let dir = temp();
-        let images = Images::open(&dir, Db::memory().await.unwrap()).unwrap();
+        let images = Images::open(&dir, &dir, Db::memory().await.unwrap()).unwrap();
         let (port, server) = serve(vec![]);
         let ids = images
             .register(&[format!("http://127.0.0.1:{port}/pixel.gif")])
@@ -400,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn fetches_once_and_serves_from_cache() {
         let dir = temp();
-        let images = Images::build(&dir, Db::memory().await.unwrap(), true).unwrap();
+        let images = Images::build(&dir, &dir, Db::memory().await.unwrap(), true).unwrap();
         let (port, server) = serve(vec![
             b"HTTP/1.1 200 OK\r\ncontent-type: image/gif\r\ncontent-length: 3\r\nconnection: close\r\n\r\nGIF",
             b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 2\r\nconnection: close\r\n\r\nhi",

@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     }
     std::fs::create_dir_all(&config.data_dir)?;
     let db = Db::open(&config.data_dir.join("bone.db")).await?;
-    let blobs = Arc::new(Blobs::open(&config.data_dir)?);
+    let blobs = Arc::new(Blobs::open(config.cache_dir())?);
 
     let mut own_domains = HashSet::new();
     for account in &config.accounts {
@@ -60,7 +60,11 @@ async fn main() -> Result<()> {
     }
     let hub = Arc::new(Hub::new());
     let pusher = Arc::new(push::Pusher::open(&config.data_dir)?);
-    let images = Arc::new(images::Images::open(&config.data_dir, db.clone())?);
+    let images = Arc::new(images::Images::open(
+        &config.data_dir,
+        config.cache_dir(),
+        db.clone(),
+    )?);
     let notifier = Arc::new(notify::Notifier {
         db: db.clone(),
         hub: hub.clone(),
