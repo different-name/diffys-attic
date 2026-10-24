@@ -17,6 +17,7 @@ stdenv.mkDerivation (finalAttrs: {
       ../web/index.html
       ../web/package.json
       ../web/pnpm-lock.yaml
+      ../web/public
       ../web/src
       ../web/tsconfig.json
       ../web/vite.config.ts
