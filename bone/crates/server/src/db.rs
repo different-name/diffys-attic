@@ -383,6 +383,126 @@ fn search_text(m: &Mailbox) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Moved {
+    pub internal_date: i64,
+    pub size: u32,
+    pub blob: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Located {
+    pub account: String,
+    pub folder_id: i64,
+    pub uid: u32,
+}
+
+impl Db {
+    pub async fn edit_flags(
+        &self,
+        folder_id: i64,
+        uids: &[u32],
+        add: &[&str],
+        remove: &[&str],
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for uid in uids {
+            let flags: Option<String> =
+                sqlx::query_scalar("SELECT flags FROM message WHERE folder_id = ? AND uid = ?")
+                    .bind(folder_id)
+                    .bind(*uid as i64)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if let Some(flags) = flags {
+                sqlx::query("UPDATE message SET flags = ? WHERE folder_id = ? AND uid = ?")
+                    .bind(crate::actions::edit_flags(&flags, add, remove))
+                    .bind(folder_id)
+                    .bind(*uid as i64)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn moved(&self, folder_id: i64, uids: &[u32]) -> Result<Vec<Moved>> {
+        let mut out = Vec::new();
+        for uid in uids {
+            let row = sqlx::query(
+                "SELECT internal_date, size, blob FROM message WHERE folder_id = ? AND uid = ? AND blob IS NOT NULL",
+            )
+            .bind(folder_id)
+            .bind(*uid as i64)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(r) = row {
+                out.push(Moved {
+                    internal_date: r.get("internal_date"),
+                    size: r.get::<i64, _>("size") as u32,
+                    blob: r.get("blob"),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    // MOVE keeps INTERNALDATE and size, so a unique match is the same message
+    pub async fn adopt_blobs(&self, folder_id: i64, moved: &[Moved]) -> Result<usize> {
+        let mut adopted = 0;
+        for m in moved {
+            let uids: Vec<i64> = sqlx::query_scalar(
+                "SELECT uid FROM message WHERE folder_id = ? AND blob IS NULL AND internal_date = ? AND size = ?",
+            )
+            .bind(folder_id)
+            .bind(m.internal_date)
+            .bind(m.size as i64)
+            .fetch_all(&self.pool)
+            .await?;
+            if let [uid] = uids[..] {
+                self.set_blob(folder_id, uid as u32, &m.blob).await?;
+                adopted += 1;
+            }
+        }
+        Ok(adopted)
+    }
+
+    pub async fn without_blob(&self, folder_id: i64, uids: &[u32]) -> Result<Vec<u32>> {
+        let mut out = Vec::new();
+        for uid in uids {
+            let missing: Option<i64> = sqlx::query_scalar(
+                "SELECT uid FROM message WHERE folder_id = ? AND uid = ? AND blob IS NULL",
+            )
+            .bind(folder_id)
+            .bind(*uid as i64)
+            .fetch_optional(&self.pool)
+            .await?;
+            out.extend(missing.map(|u| u as u32));
+        }
+        Ok(out)
+    }
+
+    pub async fn locate(&self, ids: &[i64]) -> Result<Vec<Located>> {
+        let mut out = Vec::new();
+        for id in ids {
+            let row = sqlx::query(
+                "SELECT f.account, m.folder_id, m.uid FROM message m JOIN folder f ON f.id = m.folder_id WHERE m.id = ?",
+            )
+            .bind(*id)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(r) = row {
+                out.push(Located {
+                    account: r.get("account"),
+                    folder_id: r.get("folder_id"),
+                    uid: r.get::<i64, _>("uid") as u32,
+                });
+            }
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,5 +732,93 @@ mod tests {
         assert_eq!(db.prune_parsed().await.unwrap(), 1);
         assert!(search(&db, "gone").await.is_empty());
         assert_eq!(search(&db, "keep").await, vec!["keep"]);
+    }
+
+    #[tokio::test]
+    async fn moved_messages_keep_their_blob() {
+        let db = Db::memory().await.unwrap();
+        db.upsert_folder("main", "INBOX", Some("inbox"))
+            .await
+            .unwrap();
+        db.upsert_folder("main", "Archive", Some("archive"))
+            .await
+            .unwrap();
+        let folders = db.folders("main").await.unwrap();
+        let (archive, inbox) = (folders[0].id, folders[1].id);
+        let at = |uid: u32, date: i64, size: u32| NewMessage {
+            uid,
+            modseq: 1,
+            flags: String::new(),
+            internal_date: date,
+            size,
+        };
+        db.insert_messages(inbox, &[at(1, 100, 10), at(2, 200, 20)])
+            .await
+            .unwrap();
+        db.set_blob(inbox, 1, "one").await.unwrap();
+        db.set_blob(inbox, 2, "two").await.unwrap();
+        let moved = db.moved(inbox, &[1, 2, 3]).await.unwrap();
+        assert_eq!(moved.len(), 2);
+
+        db.insert_messages(archive, &[at(7, 100, 10), at(8, 200, 20), at(9, 200, 20)])
+            .await
+            .unwrap();
+        assert_eq!(db.adopt_blobs(archive, &moved).await.unwrap(), 1);
+        assert_eq!(
+            db.without_blob(archive, &[7, 8, 9]).await.unwrap(),
+            vec![8, 9]
+        );
+    }
+
+    #[tokio::test]
+    async fn flags_are_edited_and_messages_located() {
+        let db = Db::memory().await.unwrap();
+        let f = folder(&db).await;
+        db.insert_messages(f.id, &[msg(1, "$Forwarded"), msg(2, "\\Seen")])
+            .await
+            .unwrap();
+        db.edit_flags(f.id, &[1, 2], &["\\Seen", "\\Flagged"], &[])
+            .await
+            .unwrap();
+        db.edit_flags(f.id, &[2], &[], &["\\Seen"]).await.unwrap();
+        let flags: Vec<String> = sqlx::query_scalar("SELECT flags FROM message ORDER BY uid")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(flags, vec!["$Forwarded \\Flagged \\Seen", "\\Flagged"]);
+        let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM message ORDER BY uid")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+        let located = db.locate(&[ids[1], 999]).await.unwrap();
+        assert_eq!(
+            located,
+            vec![Located {
+                account: "main".into(),
+                folder_id: f.id,
+                uid: 2
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn message_ids_are_never_reused() {
+        let db = Db::memory().await.unwrap();
+        let f = folder(&db).await;
+        db.insert_messages(f.id, &[msg(1, ""), msg(2, "")])
+            .await
+            .unwrap();
+        let ids = |db: Db| async move {
+            sqlx::query_scalar::<_, i64>("SELECT id FROM message ORDER BY id")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap()
+        };
+        let before = ids(db.clone()).await;
+        db.remove_messages(f.id, &[2]).await.unwrap();
+        db.insert_messages(f.id, &[msg(3, "")]).await.unwrap();
+        let after = ids(db.clone()).await;
+        assert_eq!(after[0], before[0]);
+        assert!(after[1] > before[1]);
     }
 }

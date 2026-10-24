@@ -1,21 +1,24 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, Query as QueryParams, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{Stream, StreamExt};
 use mail_parser::{MessageParser, MimeHeaders};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+use crate::actions::{Command, Op, SEEN};
 use crate::clean;
 use crate::db::Db;
 use crate::hub::Hub;
@@ -25,6 +28,7 @@ use crate::views::{Cursor, MessageMeta};
 
 const PAGE: u32 = 50;
 const MAX_PAGE: u32 = 200;
+const ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct App {
@@ -32,6 +36,7 @@ pub struct App {
     pub blobs: Arc<Blobs>,
     pub hub: Arc<Hub>,
     pub tokens: Arc<Vec<[u8; 32]>>,
+    pub accounts: Arc<HashMap<String, mpsc::Sender<Command>>>,
 }
 
 pub fn hash_token(token: &str) -> [u8; 32] {
@@ -48,6 +53,7 @@ pub fn router(app: App) -> Router {
         .route("/api/messages/{id}/cid/{cid}", get(inline_image))
         .route("/api/threads/{thread}", get(thread))
         .route("/api/events", get(events))
+        .route("/api/actions", post(act))
         .with_state(app)
 }
 
@@ -308,6 +314,102 @@ fn download(body: Vec<u8>, mime: &str, name: &str, inline: bool) -> Response {
     res
 }
 
+#[derive(Deserialize)]
+struct ActionRequest {
+    ids: Vec<i64>,
+    op: String,
+    folder: Option<String>,
+}
+
+async fn act(
+    State(app): State<App>,
+    headers: HeaderMap,
+    QueryParams(params): Params,
+    Json(req): Json<ActionRequest>,
+) -> ApiResult<impl IntoResponse> {
+    authed(&app, &headers, &params)?;
+    let op = Op::parse(&req.op, req.folder.as_deref())
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    if req.ids.is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "no messages given".into(),
+        ));
+    }
+    if let Op::Move(target) = &op {
+        let known = crate::views::is_role(target)
+            || app
+                .db
+                .folder_views()
+                .await?
+                .iter()
+                .any(|f| &f.key == target);
+        if !known {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("there is no folder called {target}"),
+            ));
+        }
+    }
+    let located = app.db.locate(&req.ids).await?;
+    if located.len() != req.ids.len() {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "some of those messages no longer exist, refresh and try again".into(),
+        ));
+    }
+    let mut groups: BTreeMap<(String, i64), Vec<u32>> = BTreeMap::new();
+    for l in located {
+        groups
+            .entry((l.account, l.folder_id))
+            .or_default()
+            .push(l.uid);
+    }
+    let mut replies = Vec::new();
+    // archiving means done, so the message is marked read on the way out
+    let ops = match &op {
+        Op::Move(target) if target == "archive" => vec![
+            Op::Flags {
+                add: vec![SEEN],
+                remove: vec![],
+            },
+            op.clone(),
+        ],
+        _ => vec![op.clone()],
+    };
+    for ((account, folder_id), uids) in groups {
+        let tx = app
+            .accounts
+            .get(&account)
+            .ok_or_else(|| anyhow::anyhow!("no sync task for account {account}"))?;
+        for op in &ops {
+            let (reply, rx) = oneshot::channel();
+            tx.send(Command {
+                folder_id,
+                uids: uids.clone(),
+                op: op.clone(),
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("sync task for {account} has stopped"))?;
+            replies.push(rx);
+        }
+    }
+    for rx in replies {
+        match tokio::time::timeout(ACTION_TIMEOUT, rx).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(msg))) => return Err(ApiError(StatusCode::BAD_GATEWAY, msg)),
+            _ => {
+                return Err(ApiError(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "the mail server didn't answer in time".into(),
+                ));
+            }
+        }
+    }
+    Ok(Json(json!({ "done": req.ids.len() })))
+}
+
 async fn events(
     State(app): State<App>,
     headers: HeaderMap,
@@ -415,6 +517,7 @@ mod tests {
             blobs: Arc::new(Blobs::open(&dir).unwrap()),
             hub: Arc::new(Hub::new()),
             tokens: Arc::new(vec![hash_token(TOKEN)]),
+            accounts: Arc::new(HashMap::new()),
         };
         add(&app, "main", "INBOX", Some("inbox"), 1, "\\Seen",
             "From: Shop <news@shop.example.net>\nTo: me@example.com\nMessage-ID: <1@x>\nDate: Tue, 20 Oct 2026 10:00:00 +0000\nSubject: Your invoice\n\nThanks for the order").await;
@@ -615,6 +718,109 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers[header::CONTENT_TYPE], "message/rfc822");
         assert!(body.starts_with(b"From: Shop"));
+    }
+
+    async fn post(app: App, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let res = router(app)
+            .oneshot(
+                Request::post("/api/actions")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn actions_are_grouped_per_mailbox_folder() {
+        let mut f = fixture().await;
+        let (main_tx, main_rx) = mpsc::channel::<Command>(8);
+        let (catch_tx, catch_rx) = mpsc::channel::<Command>(8);
+        f.app.accounts = Arc::new(HashMap::from([
+            ("main".to_string(), main_tx),
+            ("catch".to_string(), catch_tx),
+        ]));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for (name, mut rx) in [("main", main_rx), ("catch", catch_rx)] {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                while let Some(cmd) = rx.recv().await {
+                    seen.lock()
+                        .unwrap()
+                        .push((name, cmd.uids.len(), cmd.op.clone()));
+                    let reply = if name == "catch" && cmd.op == Op::Delete {
+                        Err("Migadu said no".to_string())
+                    } else {
+                        Ok(())
+                    };
+                    let _ = cmd.reply.send(reply);
+                }
+            });
+        }
+        let ids: Vec<i64> = json(&f, "/api/messages").await["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 4);
+
+        let (status, body) = post(f.app.clone(), json!({ "ids": ids, "op": "read" })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["done"], 4);
+        let mut calls = seen.lock().unwrap().clone();
+        calls.sort_by_key(|c| (c.0, c.1));
+        assert_eq!(
+            calls.iter().map(|c| (c.0, c.1)).collect::<Vec<_>>(),
+            vec![("catch", 1), ("catch", 1), ("main", 1), ("main", 1)]
+        );
+
+        seen.lock().unwrap().clear();
+        let (status, _) = post(f.app.clone(), json!({ "ids": [ids[0]], "op": "archive" })).await;
+        assert_eq!(status, StatusCode::OK);
+        let ops: Vec<Op> = seen.lock().unwrap().iter().map(|c| c.2.clone()).collect();
+        assert_eq!(
+            ops,
+            vec![
+                Op::Flags {
+                    add: vec![SEEN],
+                    remove: vec![]
+                },
+                Op::Move("archive".into())
+            ]
+        );
+
+        let (status, body) = post(f.app.clone(), json!({ "ids": ids, "op": "delete" })).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "Migadu said no");
+
+        let (status, _) = post(f.app.clone(), json!({ "ids": [999], "op": "read" })).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = post(f.app.clone(), json!({ "ids": ids, "op": "move" })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = post(f.app.clone(), json!({ "ids": [], "op": "read" })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, body) = post(
+            f.app.clone(),
+            json!({ "ids": ids, "op": "move", "folder": "flagged" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "there is no folder called flagged");
+        seen.lock().unwrap().clear();
+        let (status, _) = post(
+            f.app.clone(),
+            json!({ "ids": [ids[0]], "op": "move", "folder": "Receipts" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
     #[test]

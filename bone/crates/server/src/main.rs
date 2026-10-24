@@ -1,3 +1,4 @@
+mod actions;
 mod api;
 mod clean;
 mod config;
@@ -12,7 +13,7 @@ mod sync;
 mod views;
 mod watch;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,13 +64,17 @@ async fn main() -> Result<()> {
         wake.clone(),
     ));
 
+    let mut accounts = HashMap::new();
     for account in &config.accounts {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        accounts.insert(account.name.clone(), tx);
         tokio::spawn(sync::run(
             account.clone(),
             db.clone(),
             blobs.clone(),
             hub.clone(),
             wake.clone(),
+            rx,
         ));
     }
     tokio::spawn(sweep(db.clone(), blobs.clone()));
@@ -90,6 +95,7 @@ async fn main() -> Result<()> {
         blobs,
         hub,
         tokens: Arc::new(tokens),
+        accounts: Arc::new(accounts),
     };
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await

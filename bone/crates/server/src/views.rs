@@ -63,7 +63,7 @@ pub struct Cursor {
 macro_rules! with_row {
     ($select_tail:literal, $rest:literal) => {
         concat!(
-            "SELECT m.rowid AS id, p.thread, COALESCE(p.date, m.internal_date) AS date, f.role, f.path, ",
+            "SELECT m.id AS id, p.thread, COALESCE(p.date, m.internal_date) AS date, f.role, f.path, ",
             "p.from_name, p.from_addr, p.subject, p.snippet, p.recipient, m.flags, p.attachments_json",
             $select_tail,
             " FROM message m JOIN folder f ON f.id = m.folder_id JOIN parsed p ON p.blob = m.blob ",
@@ -96,8 +96,12 @@ fn row(r: &SqliteRow) -> MessageRow {
     }
 }
 
+pub fn is_role(key: &str) -> bool {
+    ROLES.iter().any(|(r, _)| *r == key)
+}
+
 fn folder_filter(qb: &mut QueryBuilder<Sqlite>, key: &str) {
-    if ROLES.iter().any(|(r, _)| *r == key) {
+    if is_role(key) {
         qb.push(" AND f.role = ").push_bind(key.to_string());
     } else {
         qb.push(" AND f.role IS NULL AND f.path = ")
@@ -181,7 +185,7 @@ impl Db {
                 .push_bind(t);
         }
         if let Some(c) = before {
-            qb.push(" AND (COALESCE(p.date, m.internal_date), m.rowid) < (")
+            qb.push(" AND (COALESCE(p.date, m.internal_date), m.id) < (")
                 .push_bind(c.date)
                 .push(", ")
                 .push_bind(c.id)
@@ -229,7 +233,7 @@ impl Db {
     pub async fn message(&self, id: i64) -> Result<Option<MessageMeta>> {
         let r = sqlx::query(with_row!(
             ", p.message_id, p.to_json, p.cc_json, p.blob",
-            "WHERE m.rowid = ?"
+            "WHERE m.id = ?"
         ))
         .bind(id)
         .fetch_optional(&self.pool)

@@ -6,10 +6,11 @@ use anyhow::{Context, Result, bail};
 use async_imap::types::{Fetch, Name};
 use futures_util::TryStreamExt;
 use tokio::sync::Notify;
-use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver};
 
+use crate::actions::{Command, DELETED, Op};
 use crate::config::AccountConfig;
-use crate::db::{Db, Folder, NewMessage};
+use crate::db::{Db, Folder, Moved, NewMessage};
 use crate::hub::{Hub, folder_key};
 use crate::imap::{self, Session};
 use crate::store::Blobs;
@@ -29,13 +30,14 @@ pub async fn run(
     blobs: Arc<Blobs>,
     hub: Arc<Hub>,
     indexer: Arc<Notify>,
+    mut commands: Receiver<Command>,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     tokio::spawn(watch::run(cfg.clone(), tx));
     let mut backoff = Duration::from_secs(5);
     loop {
         let started = tokio::time::Instant::now();
-        if let Err(e) = session(&cfg, &db, &blobs, &hub, &indexer, &mut rx).await {
+        if let Err(e) = session(&cfg, &db, &blobs, &hub, &indexer, &mut rx, &mut commands).await {
             tracing::warn!(account = cfg.name, "sync failed: {e:#}");
         }
         if started.elapsed() > MAX_BACKOFF {
@@ -53,6 +55,7 @@ async fn session(
     hub: &Hub,
     indexer: &Notify,
     rx: &mut UnboundedReceiver<Event>,
+    commands: &mut Receiver<Command>,
 ) -> Result<()> {
     let mut sync = Sync {
         account: &cfg.name,
@@ -62,6 +65,7 @@ async fn session(
         indexer,
         imap: imap::connect(cfg).await?,
         backfilled: 0,
+        adopt: Vec::new(),
     };
     bounded(sync.all()).await?;
     let mut sweep = tokio::time::interval(FULL_SWEEP);
@@ -70,6 +74,17 @@ async fn session(
     loop {
         tokio::select! {
             biased;
+            Some(cmd) = commands.recv() => {
+                let result = bounded(sync.act(cmd.folder_id, &cmd.uids, &cmd.op)).await;
+                let stalled = result.as_ref().is_err_and(is_stall);
+                if let Err(e) = &result {
+                    tracing::warn!(account = cfg.name, "action failed: {e:#}");
+                }
+                let _ = cmd.reply.send(result.map_err(|e| format!("{e:#}")));
+                if stalled {
+                    bail!("the mail server stopped answering");
+                }
+            }
             ev = rx.recv() => {
                 backfilling = true;
                 let mut events = vec![ev.context("watcher has stopped")?];
@@ -109,6 +124,10 @@ async fn bounded<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result
         .context("the mail server stopped answering")?
 }
 
+fn is_stall(e: &anyhow::Error) -> bool {
+    e.root_cause().is::<tokio::time::error::Elapsed>()
+}
+
 struct Sync<'a> {
     account: &'a str,
     db: &'a Db,
@@ -117,6 +136,7 @@ struct Sync<'a> {
     indexer: &'a Notify,
     imap: Session,
     backfilled: usize,
+    adopt: Vec<Moved>,
 }
 
 impl Sync<'_> {
@@ -234,6 +254,10 @@ impl Sync<'_> {
                 next = max + 1;
             }
             self.db.insert_messages(f.id, &new).await?;
+            if !self.adopt.is_empty() {
+                let moved = std::mem::take(&mut self.adopt);
+                self.db.adopt_blobs(f.id, &moved).await?;
+            }
         }
         next = next.max(uid_next);
 
@@ -267,8 +291,95 @@ impl Sync<'_> {
             );
         }
         if added <= LIVE_BODIES {
-            self.fetch_bodies(&f, &new_uids).await?;
+            let missing = self.db.without_blob(f.id, &new_uids).await?;
+            self.fetch_bodies(&f, &missing).await?;
         }
+        Ok(())
+    }
+
+    async fn act(&mut self, folder_id: i64, uids: &[u32], op: &Op) -> Result<()> {
+        let folders = self.db.folders(self.account).await?;
+        let f = folders
+            .into_iter()
+            .find(|f| f.id == folder_id)
+            .context("that folder no longer exists")?;
+        let mb = self.imap.select_condstore(&f.path).await?;
+        if mb.uid_validity != f.uidvalidity {
+            bail!("{} changed on the server, refresh and try again", f.path);
+        }
+        let set = imap::uid_set(uids);
+        let key = folder_key(f.role.as_deref(), &f.path);
+        match op {
+            Op::Flags { add, remove } => {
+                for (sign, flags) in [("+", add), ("-", remove)] {
+                    if !flags.is_empty() {
+                        self.imap
+                            .uid_store(&set, format!("{sign}FLAGS.SILENT ({})", flags.join(" ")))
+                            .await?
+                            .try_collect::<Vec<_>>()
+                            .await?;
+                    }
+                }
+                self.db.edit_flags(f.id, uids, add, remove).await?;
+                self.hub.changed([key]);
+            }
+            Op::Delete if f.role.as_deref() == Some("trash") => {
+                self.imap
+                    .uid_store(&set, format!("+FLAGS.SILENT ({DELETED})"))
+                    .await?
+                    .try_collect::<Vec<_>>()
+                    .await?;
+                self.imap
+                    .uid_expunge(&set)
+                    .await?
+                    .try_collect::<Vec<_>>()
+                    .await?;
+                self.db.remove_messages(f.id, uids).await?;
+                self.hub.changed([key]);
+            }
+            Op::Delete => self.move_to(&f, uids, "trash").await?,
+            Op::Move(target) => self.move_to(&f, uids, target).await?,
+        }
+        self.drain();
+        Ok(())
+    }
+
+    async fn move_to(&mut self, f: &Folder, uids: &[u32], target_key: &str) -> Result<()> {
+        let folders = self.db.folders(self.account).await?;
+        let target = match folders
+            .iter()
+            .find(|t| folder_key(t.role.as_deref(), &t.path) == target_key)
+        {
+            Some(t) => t.clone(),
+            None if crate::views::is_role(target_key) => {
+                bail!("this mailbox has no {target_key} folder")
+            }
+            None => {
+                self.imap.create(target_key).await?;
+                self.db
+                    .upsert_folder(self.account, target_key, None)
+                    .await?;
+                self.db
+                    .folders(self.account)
+                    .await?
+                    .into_iter()
+                    .find(|t| t.path == target_key)
+                    .context("created folder is missing")?
+            }
+        };
+        if target.id == f.id {
+            return Ok(());
+        }
+        let moved = self.db.moved(f.id, uids).await?;
+        self.imap.uid_mv(imap::uid_set(uids), &target.path).await?;
+        self.db.remove_messages(f.id, uids).await?;
+        self.adopt = moved;
+        self.folder(&target).await?;
+        self.adopt.clear();
+        self.hub.changed([
+            folder_key(f.role.as_deref(), &f.path),
+            folder_key(target.role.as_deref(), &target.path),
+        ]);
         Ok(())
     }
 
