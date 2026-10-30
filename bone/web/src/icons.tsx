@@ -14,6 +14,7 @@ import {
   Menu,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
   Trash2,
   WifiOff,
@@ -38,6 +39,7 @@ const icons = {
   offline: WifiOff,
   pencil: Pencil,
   inbox: Inbox,
+  refresh: RefreshCw,
 };
 
 export type IconName = keyof typeof icons;

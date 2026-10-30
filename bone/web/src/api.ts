@@ -104,23 +104,36 @@ export function withToken(path: string): string {
   return `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token())}`;
 }
 
-export function listen(onChanged: (folders: string[]) => void): () => void {
-  let source: EventSource | undefined;
-  let retry: number | undefined;
-  const open = () => {
-    source = new EventSource(withToken("/api/events"));
-    source.onopen = () => setOnline(true);
-    source.addEventListener("changed", (e) => onChanged(JSON.parse((e as MessageEvent).data).folders));
-    source.addEventListener("resync", () => onChanged([]));
-    source.onerror = () => {
-      setOnline(false);
-      source?.close();
-      retry = window.setTimeout(open, 5000);
-    };
+let source: EventSource | undefined;
+let retry: number | undefined;
+let active: ((folders: string[]) => void) | undefined;
+
+function open() {
+  if (!active) return;
+  const onChanged = active;
+  source = new EventSource(withToken("/api/events"));
+  source.onopen = () => setOnline(true);
+  source.addEventListener("changed", (e) => onChanged(JSON.parse((e as MessageEvent).data).folders));
+  source.addEventListener("resync", () => onChanged([]));
+  source.onerror = () => {
+    setOnline(false);
+    source?.close();
+    retry = window.setTimeout(open, 5000);
   };
+}
+
+export function listen(onChanged: (folders: string[]) => void): () => void {
+  active = onChanged;
   open();
   return () => {
+    active = undefined;
     source?.close();
     window.clearTimeout(retry);
   };
+}
+
+export function reconnect() {
+  window.clearTimeout(retry);
+  source?.close();
+  open();
 }

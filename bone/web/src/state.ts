@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
-import { api } from "./api";
+import { api, reconnect } from "./api";
 import { formatAddresses } from "./format";
 import type { Conversation, Folder, Op } from "./types";
 
@@ -72,6 +72,11 @@ export async function loadList() {
   } finally {
     if (gen === generation) setList("loading", false);
   }
+}
+
+export async function refreshList() {
+  reconnect();
+  await Promise.all([loadFolders(), loadList()]);
 }
 
 export async function loadMore() {

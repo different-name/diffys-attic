@@ -6,16 +6,22 @@
     <group
         android:pivotX="54"
         android:pivotY="54"
-        android:scaleX="0.9"
-        android:scaleY="0.9">
+        android:scaleX="0.8"
+        android:scaleY="0.8">
         <path
-            android:pathData="M54,28 L78,45 V68 Q78,74 72,74 H50 L40.5,82.5 Q38,84.5 38,81.5 V74 H36 Q30,74 30,68 V45 Z"
-            android:strokeColor="#FF1E1E2E"
-            android:strokeLineJoin="round"
-            android:strokeWidth="4" />
+            android:pathData="M54,14 L54,94"
+            android:strokeColor="#FFCBA6F7"
+            android:strokeLineCap="round"
+            android:strokeWidth="11.5" />
         <path
-            android:fillColor="#FF1E1E2E"
-            android:fillType="evenOdd"
-            android:pathData="M54,28 L78,45 V68 Q78,74 72,74 H50 L40.5,82.5 Q38,84.5 38,81.5 V74 H36 Q30,74 30,68 V45 Z M40.29,48.157 L54,57.756 L67.71,48.157 A2.25,2.25 0 0 1 70.29,51.843 L54,63.245 L37.71,51.843 A2.25,2.25 0 0 1 40.29,48.157 Z" />
+            android:pathData="M21,34 L87,74"
+            android:strokeColor="#FFFAB387"
+            android:strokeLineCap="round"
+            android:strokeWidth="11.5" />
+        <path
+            android:pathData="M87,34 L21,74"
+            android:strokeColor="#FF94E2D5"
+            android:strokeLineCap="round"
+            android:strokeWidth="11.5" />
     </group>
 </vector>

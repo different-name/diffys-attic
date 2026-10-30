@@ -2,8 +2,8 @@ import { batch, createEffect, createResource, createSignal, For, on, onCleanup, 
 import { api } from "./api";
 import { formatAddresses, parseAddresses } from "./format";
 import { Icon } from "./icons";
-import { addressColor, closeCompose, compose, loadList, setCompose, setNotice } from "./state";
-import type { AddressGroup, Draft, Mailbox, Outgoing, SavedDraft } from "./types";
+import { closeCompose, compose, loadList, setCompose, setNotice } from "./state";
+import type { AddressGroup, Mailbox, Outgoing, SavedDraft } from "./types";
 
 const SAVE_AFTER = 2000;
 
@@ -149,31 +149,21 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
   const [sending, setSending] = createSignal(false);
   let body!: HTMLTextAreaElement;
 
-  const replyDraft = (): Draft | undefined => draft();
-  const recipients = (): Mailbox[] => {
-    const d = replyDraft();
-    return d ? d.to : parseAddresses(to());
-  };
-  const ccs = (): Mailbox[] => {
-    const d = replyDraft();
-    return d ? d.cc : parseAddresses(cc());
-  };
-  const sender = () => replyDraft()?.from ?? from();
+  const recipients = (): Mailbox[] => parseAddresses(to());
+  const ccs = (): Mailbox[] => parseAddresses(cc());
+  const sender = () => from();
   const ready = () => !!sender() && (recipients().length > 0 || ccs().length > 0) && !sending();
 
-  const payload = (): Outgoing => {
-    const d = replyDraft();
-    return {
-      from: sender(),
-      to: recipients(),
-      cc: ccs(),
-      bcc: [],
-      subject: d ? d.subject : subject(),
-      text: text(),
-      reply_to: d?.reply_to ?? replyTo(),
-    };
-  };
-  const hasContent = () => !!text().trim() || (!props.reply && !!(subject().trim() || to().trim() || cc().trim()));
+  const payload = (): Outgoing => ({
+    from: sender(),
+    to: recipients(),
+    cc: ccs(),
+    bcc: [],
+    subject: subject(),
+    text: text(),
+    reply_to: replyTo(),
+  });
+  const hasContent = () => !!text().trim() || !!(subject().trim() || to().trim() || cc().trim());
 
   let timer: number | undefined;
   let inflight = false;
@@ -247,6 +237,20 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
     else if (key) lastSaved = JSON.stringify(payload());
   });
 
+  createEffect(
+    on(draft, (d) => {
+      if (!d) return;
+      batch(() => {
+        setFrom(d.from ?? "");
+        setTo(formatAddresses(d.to));
+        setCc(formatAddresses(d.cc));
+        setSubject(d.subject);
+        setReplyTo(d.reply_to ?? undefined);
+      });
+      lastSaved = JSON.stringify(payload());
+    }),
+  );
+
   const discard = () => {
     finished = true;
     discarded = true;
@@ -272,16 +276,15 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
   const send = async () => {
     if (!ready()) return;
     setSending(true);
-    const d = replyDraft();
     try {
       const res = await api.send({
         from: sender(),
         to: recipients(),
         cc: ccs(),
         bcc: [],
-        subject: d ? d.subject : subject(),
+        subject: subject(),
         text: text(),
-        reply_to: d?.reply_to ?? replyTo(),
+        reply_to: replyTo(),
         draft: draftKey(),
       });
       finished = true;
@@ -300,46 +303,23 @@ export function Composer(props: { reply?: { id: number; all: boolean }; pane?: b
     <div class="composer" style={{ position: "relative" }} onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && void send()}>
       <div class="fields">
         <span>from</span>
-        <Show
-          when={!props.reply}
-          fallback={
-            <div class="locked">
-              <Icon name="lock" size={12} style={{ color: "var(--meta)" }} />
-              <span class="addr" style={{ "font-size": "12px", color: addressColor(replyDraft()?.from) }}>
-                {replyDraft()?.from ?? ""}
-              </span>
-            </div>
-          }
-        >
-          <div>
-            <button class={`from-btn${from() ? " set" : ""}`} onClick={() => {
-                setPickerFocus(true);
-                setPicker(!picker());
-              }}
-              aria-haspopup="dialog"
-            >
-              <span style={{ flex: 1 }}>{from() || "Choose who this comes from"}</span>
-              <Icon name={picker() ? "up" : "down"} />
-            </button>
-          </div>
-        </Show>
+        <div>
+          <button class={`from-btn${from() ? " set" : ""}`} onClick={() => {
+              setPickerFocus(true);
+              setPicker(!picker());
+            }}
+            aria-haspopup="dialog"
+          >
+            <span style={{ flex: 1 }}>{from() || "Choose who this comes from"}</span>
+            <Icon name={picker() ? "up" : "down"} />
+          </button>
+        </div>
         <span>to</span>
-        <Show
-          when={!props.reply}
-          fallback={
-            <div style={{ display: "flex", gap: "6px", "flex-wrap": "wrap" }}>
-              <For each={[...recipients(), ...ccs()]}>{(m) => <span class="to-chip">{m.name || m.addr}</span>}</For>
-            </div>
-          }
-        >
-          <input class="field" aria-label="To" value={to()} onInput={(e) => setTo(e.currentTarget.value)} onBlur={() => void suggest()} />
-        </Show>
-        <Show when={!props.reply}>
-          <span>cc</span>
-          <input class="field" aria-label="Cc" value={cc()} onInput={(e) => setCc(e.currentTarget.value)} />
-          <span>subject</span>
-          <input class="field" aria-label="Subject" value={subject()} onInput={(e) => setSubject(e.currentTarget.value)} />
-        </Show>
+        <input class="field" aria-label="To" value={to()} onInput={(e) => setTo(e.currentTarget.value)} onBlur={() => void suggest()} />
+        <span>cc</span>
+        <input class="field" aria-label="Cc" value={cc()} onInput={(e) => setCc(e.currentTarget.value)} />
+        <span>subject</span>
+        <input class="field" aria-label="Subject" value={subject()} onInput={(e) => setSubject(e.currentTarget.value)} />
       </div>
       <Show when={props.reply && draft.error}>
         <p class="error" style={{ padding: "8px 12px", "font-size": "12px" }}>

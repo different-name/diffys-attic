@@ -18,6 +18,7 @@ import {
   open,
   openDraft,
   query,
+  refreshList,
   search,
   searchOpen,
   searching,
@@ -30,6 +31,58 @@ import type { Conversation } from "./types";
 
 const SWIPE_ARCHIVE = 110;
 const LONG_PRESS = 450;
+const PULL_AT = 64;
+
+function pullToRefresh(rows: () => HTMLDivElement | undefined) {
+  const [pull, setPull] = createSignal(0);
+  const [refreshing, setRefreshing] = createSignal(false);
+  let start: { y: number; id: number } | null = null;
+  let active = false;
+  let decided = false;
+
+  const end = () => {
+    if (active && pull() >= PULL_AT && !refreshing()) {
+      setRefreshing(true);
+      setPull(PULL_AT);
+      void refreshList().finally(() => {
+        setRefreshing(false);
+        setPull(0);
+      });
+    } else {
+      setPull(0);
+    }
+    start = null;
+    active = false;
+  };
+
+  return {
+    pull,
+    refreshing,
+    handlers: {
+      onPointerDown(e: PointerEvent) {
+        const el = rows();
+        if (e.pointerType === "mouse" || refreshing() || !el || el.scrollTop > 0) return;
+        start = { y: e.clientY, id: e.pointerId };
+        active = false;
+        decided = false;
+      },
+      onPointerMove(e: PointerEvent) {
+        if (!start || e.pointerId !== start.id) return;
+        const dy = e.clientY - start.y;
+        if (!decided) {
+          if (Math.abs(dy) < 10) return;
+          decided = true;
+          const el = rows();
+          active = dy > 0 && !!el && el.scrollTop <= 0;
+        }
+        if (!active) return;
+        setPull(Math.min(PULL_AT * 1.4, dy * 0.5));
+      },
+      onPointerUp: end,
+      onPointerCancel: end,
+    },
+  };
+}
 
 const selecting = () => checked().size > 0;
 
@@ -246,6 +299,8 @@ function SelectionBar() {
 export function List(props: { searchRef?: (el: HTMLInputElement) => void }) {
   const current = () => folders().find((f) => f.key === folder());
   const title = () => (searching() ? "Search" : (current()?.name ?? "Inbox"));
+  let rowsEl: HTMLDivElement | undefined;
+  const { pull, refreshing, handlers } = pullToRefresh(() => rowsEl);
 
   return (
     <section class={`list${selecting() ? " selecting" : ""}`} aria-label={title()} {...drawerSwipe(1, () => !selecting())}>
@@ -277,8 +332,17 @@ export function List(props: { searchRef?: (el: HTMLInputElement) => void }) {
           <Icon name="search" size={20} />
         </button>
       </div>
+      <div class="pull" style={{ height: `${refreshing() ? PULL_AT : pull()}px` }}>
+        <Icon
+          name="refresh"
+          size={18}
+          style={refreshing() ? { animation: "spin 0.8s linear infinite" } : { transform: `rotate(${Math.min(pull(), PULL_AT) * (180 / PULL_AT)}deg)` }}
+        />
+      </div>
       <div
         class="rows"
+        ref={rowsEl}
+        {...handlers}
         onScroll={(e) => {
           const el = e.currentTarget;
           if (el.scrollTop + el.clientHeight > el.scrollHeight - 400) void loadMore();
