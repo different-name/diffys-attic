@@ -1,0 +1,4 @@
+node_modules
+/result
+/target
+/web/dist
