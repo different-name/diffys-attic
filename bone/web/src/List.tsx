@@ -33,7 +33,7 @@ const SWIPE_ARCHIVE = 110;
 const LONG_PRESS = 450;
 const PULL_AT = 64;
 
-function pullToRefresh(rows: () => HTMLDivElement | undefined) {
+function pullToRefresh() {
   const [pull, setPull] = createSignal(0);
   const [refreshing, setRefreshing] = createSignal(false);
   let start: { y: number; id: number } | null = null;
@@ -48,40 +48,48 @@ function pullToRefresh(rows: () => HTMLDivElement | undefined) {
         setRefreshing(false);
         setPull(0);
       });
-    } else {
+    } else if (!refreshing()) {
       setPull(0);
     }
     start = null;
     active = false;
   };
 
-  return {
-    pull,
-    refreshing,
-    handlers: {
-      onPointerDown(e: PointerEvent) {
-        const el = rows();
-        if (e.pointerType === "mouse" || refreshing() || !el || el.scrollTop > 0) return;
-        start = { y: e.clientY, id: e.pointerId };
+  // touch events because the browser cancels pointer events once it claims the vertical pan
+  const bind = (el: HTMLDivElement) => {
+    el.addEventListener(
+      "touchstart",
+      (e) => {
+        start = null;
+        if (e.touches.length !== 1 || refreshing() || el.scrollTop > 0) return;
+        start = { y: e.touches[0].clientY, id: e.touches[0].identifier };
         active = false;
         decided = false;
       },
-      onPointerMove(e: PointerEvent) {
-        if (!start || e.pointerId !== start.id) return;
-        const dy = e.clientY - start.y;
+      { passive: true },
+    );
+    el.addEventListener(
+      "touchmove",
+      (e) => {
+        const t = start && Array.from(e.touches).find((t) => t.identifier === start!.id);
+        if (!t) return;
+        const dy = t.clientY - start!.y;
         if (!decided) {
           if (Math.abs(dy) < 10) return;
           decided = true;
-          const el = rows();
-          active = dy > 0 && !!el && el.scrollTop <= 0;
+          active = dy > 0 && el.scrollTop <= 0;
         }
         if (!active) return;
-        setPull(Math.min(PULL_AT * 1.4, dy * 0.5));
+        e.preventDefault();
+        setPull(Math.min(PULL_AT * 1.4, Math.max(0, dy * 0.5)));
       },
-      onPointerUp: end,
-      onPointerCancel: end,
-    },
+      { passive: false },
+    );
+    el.addEventListener("touchend", end);
+    el.addEventListener("touchcancel", end);
   };
+
+  return { pull, refreshing, bind };
 }
 
 const selecting = () => checked().size > 0;
@@ -299,8 +307,7 @@ function SelectionBar() {
 export function List(props: { searchRef?: (el: HTMLInputElement) => void }) {
   const current = () => folders().find((f) => f.key === folder());
   const title = () => (searching() ? "Search" : (current()?.name ?? "Inbox"));
-  let rowsEl: HTMLDivElement | undefined;
-  const { pull, refreshing, handlers } = pullToRefresh(() => rowsEl);
+  const { pull, refreshing, bind } = pullToRefresh();
 
   return (
     <section class={`list${selecting() ? " selecting" : ""}`} aria-label={title()} {...drawerSwipe(1, () => !selecting())}>
@@ -341,8 +348,7 @@ export function List(props: { searchRef?: (el: HTMLInputElement) => void }) {
       </div>
       <div
         class="rows"
-        ref={rowsEl}
-        {...handlers}
+        ref={bind}
         onScroll={(e) => {
           const el = e.currentTarget;
           if (el.scrollTop + el.clientHeight > el.scrollHeight - 400) void loadMore();
