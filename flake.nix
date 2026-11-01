@@ -1,5 +1,5 @@
 {
-  description = "bone, a personal mail server";
+  description = "diffy's attic";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -14,12 +14,11 @@
         "aarch64-linux"
       ];
 
-      flake.nixosModules.server = ./nix/server.nix;
+      flake.nixosModules.bone = ./bone/nix/server.nix;
 
       perSystem =
         {
           pkgs,
-          self',
           system,
           ...
         }:
@@ -34,12 +33,11 @@
         in
         {
           packages = {
-            bone = pkgs.callPackage ./nix/package.nix { };
-            bone-web = pkgs.callPackage ./nix/web.nix { };
-            default = self'.packages.bone;
+            bone = pkgs.callPackage ./bone/nix/package.nix { };
+            bone-web = pkgs.callPackage ./bone/nix/web.nix { };
           };
 
-          devShells.default = pkgs.mkShell {
+          devShells.bone = pkgs.mkShell {
             packages = with pkgs; [
               cargo
               rustc
@@ -54,7 +52,7 @@
             ];
           };
 
-          devShells.android = androidPkgs.callPackage ./nix/android-shell.nix { };
+          devShells.bone-android = androidPkgs.callPackage ./bone/nix/android-shell.nix { };
         };
     };
 }
