@@ -593,11 +593,10 @@ public class SummonedVehicle {
     if playerShift > FollowParkShift() {
       this.shortRetries = 0;
     }
-    let followDistance = MaxF(FollowMinDistance(), StopDistance() + FollowStopDistanceExtra());
-    if !this.gaveUp && distance > followDistance && playerShift > FollowParkShift()
-      && stoppedFor > FollowAfter() && vehicleSpeed < StoppedSpeed() {
-      ReleaseBrakes(vehicle);
-      this.StartDrive(vehicle, now);
+    let walkAwayDistance = MaxF(WalkAwayMinDistance(), StopDistance() + WalkAwayStopDistanceExtra());
+    if !this.gaveUp && distance > walkAwayDistance && playerShift > FollowParkShift()
+      && stoppedFor > WalkAwayAfter() && vehicleSpeed < StoppedSpeed() {
+      this.ReleaseQuietly();
       return;
     }
     if this.stoppedShort && !this.queued && !this.gaveUp && this.shortRetries < ShortRetries()
