@@ -5,7 +5,6 @@
     const tokens = metro.findByProps("SemanticColor");
     const resolver = tokens.default.meta ?? tokens.default.internal;
     const ThemeStore = metro.findByStoreName("ThemeStore");
-    const runtime = metro.findByProps("jsx", "jsxs", "Fragment");
     const themeKind = metro.findByProps("isThemeDark", "isThemeLight");
     const { NativeModules, AppState, StatusBar } = ReactNative;
     const nativeTheme = NativeModules.NativeThemeModule ?? NativeModules.RTNThemeManager ?? NativeModules.DCDTheme;
@@ -61,10 +60,18 @@
 
     // themes darken text on colored fills, but this label shares its token with text over media
     function recolorJoinVoice(args) {
-        const props = args[1];
+        const props = args[0];
         if (props?.color === "text-overlay-light" && props.children === "Join Voice") {
-            args[1] = { ...props, color: "control-connected-text-default" };
+            args[0] = { ...props, color: "control-connected-text-default" };
         }
+    }
+
+    // components bind jsx at module init, but read Text off its module at render time
+    function patchText() {
+        const text = bunny.metro.findByFilePath("design/components/Text/native/Text.tsx", false);
+        if (typeof text?.Text === "function") return patcher.before("Text", text, recolorJoinVoice);
+        if (typeof text?.Text?.render === "function") return patcher.before("render", text.Text, recolorJoinVoice);
+        return () => {};
     }
 
     let unpatches = [];
@@ -79,8 +86,7 @@
 
             if (nativeTheme?.updateTheme) unpatches.push(patcher.before("updateTheme", nativeTheme, mapNativeTheme));
             unpatches.push(patcher.before("setBarStyle", StatusBar, mapBarStyle));
-            unpatches.push(patcher.before("jsx", runtime, recolorJoinVoice));
-            unpatches.push(patcher.before("jsxs", runtime, recolorJoinVoice));
+            unpatches.push(patchText());
 
             // native picks its status bar style during startup without going through updateTheme, so resync once things settle
             const syncSoon = () => {
