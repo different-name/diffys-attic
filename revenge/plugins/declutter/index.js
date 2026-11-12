@@ -1,78 +1,103 @@
 (() => {
     const { patcher, metro } = vendetta;
-    const runtime = metro.findByProps("jsx", "jsxs", "Fragment");
+    const byPath = path => bunny.metro.findByFilePath(path, false);
     const UserStore = metro.findByStoreName("UserStore");
     const UserProfileStore = metro.findByStoreName("UserProfileStore");
     const ApexExperimentStore = metro.findByStoreName("ApexExperimentStore");
-    const { View } = metro.common.ReactNative;
+    const ChannelListStore = metro.findByStoreName("ChannelListStore");
+    const AccessibilityStore = metro.findByStoreName("AccessibilityStore");
 
-    const navButtons = new Set(["Quests", "Shop", "Nitro", "Send a gift"]);
-    const settingsRows = new Set(["Get Nitro", "Shop", "Quests", "Server Boost", "Gift Inventory"]);
+    const hiddenSettings = new Set([
+        "PREMIUM",
+        "COLLECTIBLES_SHOP",
+        "QUEST_HOME",
+        "PREMIUM_MANAGE_SUBSCRIPTIONS",
+        "PREMIUM_GUILD_BOOSTING",
+        "PREMIUM_GIFTING",
+        "GUILD_ROLE_SUBSCRIPTIONS",
+        "PREMIUM_RESTORE_SUBSCRIPTION",
+    ]);
+    const hiddenNavIcons = ["QuestsIcon", "ShopIcon", "NitroWheelIcon"];
+    const boostRows = new Set(["guild-boosts", "guild-premium-progress-bar"]);
     const strippedUserFields = ["primaryGuild", "displayNameStyles"];
     const strippedUserGetters = ["avatarDecoration", "nameplate"];
-
-    function isClutter(props) {
-        if (!props) return false;
-        const a11y = props.accessibilityLabel;
-        if (typeof a11y === "string") {
-            if (props.IconComponent && navButtons.has(a11y)) return true;
-            if (a11y.startsWith("Orbs balance")) return true;
-            if (a11y === "Server Boosts" && "channelInfo" in props) return true;
-            if (a11y === "Apps" && props.accessibilityRole === "button") return true;
-        }
-        if (typeof props.label === "string" && "arrow" in props && "subLabel" in props) {
-            return settingsRows.has(props.label);
-        }
-        if (props.title === "Billing Settings") return true;
-        // the profile tab bar is left with only main once the wishlist is removed
-        const tabs = props.state?.items;
-        return "variant" in props && props.state?.activeIndex != null && tabs?.length === 1 && tabs[0]?.id === "main";
-    }
 
     const hiddenBadgePrefixes = ["gifting", "premium", "guild_booster", "quest_"];
     const isHiddenBadge = badge => typeof badge?.id === "string"
         && hiddenBadgePrefixes.some(prefix => badge.id.startsWith(prefix));
 
-    function cleanProps(props) {
-        let cleaned = props;
-        if (Array.isArray(props.badges) && props.badges.some(isHiddenBadge)) {
-            cleaned = { ...cleaned, badges: props.badges.filter(badge => !isHiddenBadge(badge)) };
-        }
-        // the channel list header is also the banner, so render it as if the server had none
-        if (props.guild?.banner && "bannerHeight" in props) {
-            cleaned = { ...cleaned, guild: { ...props.guild, banner: null } };
-        }
-        if (props.displayNameStylesEnabled) {
-            cleaned = { ...cleaned, displayNameStylesEnabled: false, currentUserDisplayNameStyles: null };
-        }
-        return cleaned;
+    function withoutSettings(args) {
+        const sections = args[0]?.sections;
+        if (!Array.isArray(sections)) return;
+        args[0] = {
+            ...args[0],
+            sections: sections
+                .map(section => (Array.isArray(section?.settings)
+                    ? { ...section, settings: section.settings.filter(key => !hiddenSettings.has(key)) }
+                    : section))
+                .filter(section => !Array.isArray(section?.settings) || section.settings.length),
+        };
     }
 
-    const isBoostRow = row => row === "guild-boosts";
-
-    // hiding the boosts row still leaves its section divider, so drop it from the list model
-    function stripBoostRow(channelList) {
-        const actions = channelList.guildActionSection;
-        if (!Array.isArray(actions?.guildActionRows) || !actions.guildActionRows.some(isBoostRow)) return;
-        if (!Array.isArray(channelList.rows) || !Array.isArray(channelList.sections)) return;
-        actions.guildActionRows = actions.guildActionRows.filter(row => !isBoostRow(row));
-        channelList.rows.forEach((rows, section) => {
-            if (!Array.isArray(rows) || !rows.some(isBoostRow)) return;
-            channelList.rows[section] = rows.filter(row => !isBoostRow(row));
-            channelList.sections[section] = channelList.rows[section].length;
-        });
+    function withoutBoostRows(args) {
+        const rows = args[1]?.guildActionRows;
+        if (Array.isArray(rows) && rows.some(row => boostRows.has(row))) {
+            args[1] = { ...args[1], guildActionRows: rows.filter(row => !boostRows.has(row)) };
+        }
     }
 
-    // some parents read .type on their children, so null crashes them
-    const hidden = { style: { display: "none" } };
+    // only the channel list sees the copy, server settings would save a null banner back
+    const cleanedGuilds = new WeakMap();
+    function withoutBanner(args) {
+        const guild = args[0]?.guild;
+        if (!guild?.banner || typeof guild !== "object") return;
+        let cleaned = cleanedGuilds.get(guild);
+        if (!cleaned) {
+            cleaned = { ...guild, banner: null };
+            cleanedGuilds.set(guild, cleaned);
+        }
+        args[0] = { ...args[0], guild: cleaned };
+    }
 
-    function filter(args, orig) {
-        const props = args[1];
-        if (!props) return orig(...args);
-        if (props.guildChannels) stripBoostRow(props.guildChannels);
-        if (isClutter(props)) return orig(View, hidden, args[2]);
-        args[1] = cleanProps(props);
-        return orig(...args);
+    // the profile tab bar is left with only main once the wishlist is removed
+    const isMainOnly = props => props?.state?.items?.length === 1 && props.state.items[0]?.id === "main";
+
+    // components bind jsx at module init, so patch what they read at render time instead
+    function patchRenderGates(unpatches) {
+        const navIcon = byPath("modules/main_tabs_v2/native/tabs/you/YouScreenNavIcon.tsx")?.default;
+        const icons = new Set(hiddenNavIcons.map(name => metro.findByProps(name)?.[name]).filter(Boolean));
+        if (typeof navIcon?.type === "function") {
+            unpatches.push(patcher.instead("type", navIcon, (args, orig) =>
+                (icons.has(args[0]?.IconComponent) ? null : orig(...args))));
+        }
+
+        const createList = metro.findByProps("createList");
+        if (createList) unpatches.push(patcher.before("createList", createList, withoutSettings));
+
+        const orbs = metro.findByProps("useVirtualCurrencyMobileEnabled");
+        if (orbs) {
+            unpatches.push(patcher.after("useVirtualCurrencyMobileEnabled", orbs, (_args, result) =>
+                ({ ...result, enabled: false })));
+        }
+
+        const billing = metro.findByProps("isPremiumGiftingSupported");
+        if (billing) unpatches.push(patcher.instead("isPremiumGiftingSupported", billing, () => false));
+
+        const appLauncher = metro.findByProps("getIsAppLauncherEnabled");
+        if (appLauncher) unpatches.push(patcher.instead("getIsAppLauncherEnabled", appLauncher, () => false));
+
+        const channelList = byPath("modules/channel_list_v2/native/RedesignChannelList.tsx")?.ChannelList;
+        if (typeof channelList?.type === "function") unpatches.push(patcher.before("type", channelList, withoutBanner));
+
+        for (const mod of new Set(metro.findByPropsAll("Tabs"))) {
+            if (typeof mod.Tabs !== "function") continue;
+            unpatches.push(patcher.instead("Tabs", mod, (args, orig) => (isMainOnly(args[0]) ? null : orig(...args))));
+        }
+
+        unpatches.push(patcher.before("getGuild", ChannelListStore, withoutBoostRows));
+
+        Object.defineProperty(AccessibilityStore, "displayNameStylesEnabled", { configurable: true, get: () => false });
+        unpatches.push(() => delete AccessibilityStore.displayNameStylesEnabled);
     }
 
     function withoutWishlist(args) {
@@ -129,30 +154,29 @@
 
     const disabledExperiments = new Set([
         "2025-10-mobile-home-drawer",
-        "2025-12-nitro-s-rewards",
         "2026-01-mobile-go-live-entrypoint",
-        "2026-03-mobile-quest-home-red-dot-notification",
         "2026-04-gifting-badge",
         "2026-04-http-request-sample",
-        "2026-04-mobile-boost-progress-bar",
         "2026-04-mobile-go-live-upsell",
         "2026-05-bounty-stale-refresh-quest-home",
         "2026-05-server-theme-user",
         "2026-06-android-two-week-trials",
-        "2026-06-gummy-bears",
-        "2026-06-gummy-viewers",
-        "2026-06-mobile-friendship-anniversary",
-        "2026-06-mobile-server-tag",
-        "2026-07-ad-recheck-interval-experiment",
         "2026-07-custom-typing-indicator",
-        "2026-07-mobile-boosting-optimizations",
         "2026-07-nitro-floating-subscribe",
         "2026-07-shop-this-look-mobile",
+        "2026-08-badge-management",
         "2026-08-bounties-mobile-quest-bar",
         "2026-08-nitro-tenure-badge-withheld-state",
+        "2026-08-no-fill-logging",
         "2026-09-bounties-android-quest-bar-smoke-animation",
         "2026-09-gifting-badge-coachmark-audience",
+        "2026-09-mobile-nitro-orbs-delivered-modal",
         "2026-09-mobile-nitro-upsell-in-shop-feed",
+        "2026-09-mobile-sticker-picker-upsell-restyle",
+        "2026-09-profile-frame-layer-preload-mobile",
+        "2026-09-quest-mobile-bar-secondary-cta",
+        "2026-10-recurring-referral-reminder",
+        "2026-10-server-tag-upsell-on-profile",
     ]);
 
     // no assignment means getConfig and useConfig fall back to the default config and skip exposure tracking
@@ -164,23 +188,26 @@
 
     return {
         onLoad() {
-            unpatches.push(patcher.instead("jsx", runtime, filter));
-            unpatches.push(patcher.instead("jsxs", runtime, filter));
             for (const mod of metro.findByPropsAll("useSegmentedControlState")) {
                 unpatches.push(patcher.before("useSegmentedControlState", mod, withoutWishlist));
             }
             unpatches.push(patcher.after("getUserProfile", UserProfileStore, cleanProfile));
             unpatches.push(patcher.after("getGuildMemberProfile", UserProfileStore, cleanProfile));
+            patchRenderGates(unpatches);
             unpatches.push(stripUserFields());
             unpatches.push(patcher.after("getEvaluationAndAssignmentInner", ApexExperimentStore, unassignExperiments));
             ApexExperimentStore.emitChange();
             UserProfileStore.emitChange();
+            ChannelListStore.emitChange();
+            AccessibilityStore.emitChange();
         },
         onUnload() {
             for (const unpatch of unpatches) unpatch();
             unpatches = [];
             UserStore.emitChange();
             UserProfileStore.emitChange();
+            ChannelListStore.emitChange();
+            AccessibilityStore.emitChange();
         },
     };
 })()
