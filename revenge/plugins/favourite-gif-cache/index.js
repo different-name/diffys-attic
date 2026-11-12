@@ -3,7 +3,7 @@
     const { React, ReactNative } = metro.common;
     const { NativeModules, View, Text, Pressable } = ReactNative;
 
-    const runtime = metro.findByProps("jsx", "jsxs", "Fragment");
+    const fastImage = bunny.metro.findByFilePath("components_native/common/FastImage.tsx", false)?.default;
     const files = NativeModules.NativeFileModule ?? NativeModules.RTNFileManager ?? NativeModules.DCDFileManager;
     const tokens = metro.findByProps("SemanticColor");
     const resolver = tokens.default.meta ?? tokens.default.internal;
@@ -126,7 +126,7 @@
     }
 
     function serveFromDisk(args) {
-        const props = args[1];
+        const props = args[0];
         const uri = props?.source?.uri;
         if (typeof uri !== "string" || !uri.startsWith("http")) return;
         const key = cacheKey(uri);
@@ -134,7 +134,7 @@
         if (!entry) return;
         entry.lastUsed = Date.now();
         saveSoon();
-        args[1] = { ...props, source: { ...props.source, uri: `file://${documents}/${DIR}/${entry.file}` } };
+        args[0] = { ...props, source: { ...props.source, uri: `file://${documents}/${DIR}/${entry.file}` } };
     }
 
     async function clear() {
@@ -202,8 +202,8 @@
             for (const mod of new Set(metro.findByPropsAll("useSortedFavoriteGIFs"))) {
                 unpatches.push(patcher.after("useSortedFavoriteGIFs", mod, learnFavorites));
             }
-            unpatches.push(patcher.before("jsx", runtime, serveFromDisk));
-            unpatches.push(patcher.before("jsxs", runtime, serveFromDisk));
+            // picker tiles are FastImage, a memo, so patching its inner component reaches every new mount
+            if (typeof fastImage?.type === "function") unpatches.push(patcher.before("type", fastImage, serveFromDisk));
             prefetch();
         },
         onUnload() {
