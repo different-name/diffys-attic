@@ -3,6 +3,7 @@
   rustPlatform,
   pkg-config,
   openssl,
+  sqlite,
 }:
 
 rustPlatform.buildRustPackage {
@@ -21,7 +22,10 @@ rustPlatform.buildRustPackage {
   cargoLock.lockFile = ../Cargo.lock;
 
   nativeBuildInputs = [ pkg-config ];
-  buildInputs = [ openssl ];
+  buildInputs = [
+    openssl
+    sqlite
+  ];
 
   meta = {
     description = "Mail server that merges Migadu mailboxes behind one API";
