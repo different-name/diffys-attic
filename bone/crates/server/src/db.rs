@@ -242,6 +242,20 @@ impl Db {
         Ok(())
     }
 
+    pub async fn forget_blobs(&self, blobs: &[String]) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
+        let mut forgotten = 0;
+        for blob in blobs {
+            forgotten += sqlx::query("UPDATE message SET blob = NULL WHERE blob = ?")
+                .bind(blob)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        }
+        tx.commit().await?;
+        Ok(forgotten)
+    }
+
     pub async fn referenced_blobs(&self) -> Result<HashSet<String>> {
         let blobs: Vec<String> =
             sqlx::query_scalar("SELECT DISTINCT blob FROM message WHERE blob IS NOT NULL")
@@ -739,6 +753,24 @@ mod tests {
         db.remove_messages(f.id, &[2, 3]).await.unwrap();
         assert!(db.referenced_blobs().await.unwrap().is_empty());
         assert_eq!(db.uids(f.id).await.unwrap(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn forgotten_blobs_are_fetched_again() {
+        let db = Db::memory().await.unwrap();
+        let f = folder(&db).await;
+        db.insert_messages(f.id, &[msg(1, ""), msg(2, ""), msg(3, "")])
+            .await
+            .unwrap();
+        db.set_blob(f.id, 1, "aa").await.unwrap();
+        db.set_blob(f.id, 2, "aa").await.unwrap();
+        db.set_blob(f.id, 3, "bb").await.unwrap();
+        assert_eq!(db.forget_blobs(&["aa".to_string()]).await.unwrap(), 2);
+        assert_eq!(db.missing_blobs(f.id, 10).await.unwrap(), vec![2, 1]);
+        assert_eq!(
+            db.referenced_blobs().await.unwrap(),
+            HashSet::from(["bb".to_string()])
+        );
     }
 
     #[tokio::test]

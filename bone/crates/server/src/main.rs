@@ -159,13 +159,23 @@ async fn sweep(db: Db, blobs: Arc<Blobs>, images: Arc<images::Images>) {
             db.prune_notified(notify::now() - 30 * 24 * 60 * 60).await?;
             images.sweep(90 * 24 * 60 * 60).await?;
             let keep = db.referenced_blobs().await?;
-            Ok::<_, anyhow::Error>((pruned, blobs.sweep(&keep, SWEEP_EVERY)?))
+            // a cache dir lost to a reinstall or cleanup would otherwise fail every read of those messages
+            let lost: Vec<String> = keep.iter().filter(|b| !blobs.has(b)).cloned().collect();
+            let refetch = db.forget_blobs(&lost).await?;
+            Ok::<_, anyhow::Error>((pruned, blobs.sweep(&keep, SWEEP_EVERY)?, refetch))
         }
         .await;
         match result {
-            Ok((0, 0)) => {}
-            Ok((pruned, removed)) => {
-                tracing::info!(pruned, removed, "swept unreferenced messages")
+            Ok((pruned, removed, refetch)) => {
+                if refetch > 0 {
+                    tracing::warn!(
+                        refetch,
+                        "message bodies missing from the cache, downloading them again"
+                    );
+                }
+                if pruned > 0 || removed > 0 {
+                    tracing::info!(pruned, removed, "swept unreferenced messages");
+                }
             }
             Err(e) => tracing::warn!("blob sweep failed: {e:#}"),
         }

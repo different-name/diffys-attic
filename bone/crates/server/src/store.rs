@@ -37,6 +37,10 @@ impl Blobs {
         Ok(std::fs::read(self.path(id))?)
     }
 
+    pub fn has(&self, id: &str) -> bool {
+        self.path(id).exists()
+    }
+
     // blobs newer than min_age may belong to a fetch whose row isn't updated yet
     pub fn sweep(&self, keep: &HashSet<String>, min_age: Duration) -> Result<usize> {
         let cutoff = SystemTime::now() - min_age;
@@ -80,6 +84,8 @@ mod tests {
         let b = blobs.put(b"hello").unwrap();
         assert_eq!(a, b);
         assert_eq!(blobs.get(&a).unwrap(), b"hello");
+        assert!(blobs.has(&a));
+        assert!(!blobs.has(&"0".repeat(64)));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
